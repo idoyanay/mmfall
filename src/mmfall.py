@@ -1,3 +1,15 @@
+# Cell 1
+# from google.colab import drive
+# drive.mount('/content/drive')
+
+# ----------------------------------------------------------------------------
+
+# Cell 2
+
+
+# ----------------------------------------------------------------------------
+
+# Cell 3
 # Author: Feng Jin. Contact info: fengjin@email.arizona.edu
 import argparse, os
 import matplotlib.pyplot as plt
@@ -22,8 +34,6 @@ params = {'legend.fontsize': 'x-large',
          'ytick.labelsize':'x-large'}
 pylab.rcParams.update(params)
 
-
-
 class data_preproc:
     def __init__(self):
         # One motion pattern is as (self.frames_per_pattern, self.points_per_frame, self.features_per_point)
@@ -40,7 +50,7 @@ class data_preproc:
         self.rotation_matrix = np.array([[1.0, 0.0, 0.0],\
                                         [0.0, np.cos(np.deg2rad(tilt_angle)), np.sin(np.deg2rad(tilt_angle))],\
                                         [0.0, -np.sin(np.deg2rad(tilt_angle)), np.cos(np.deg2rad(tilt_angle))]])
-             
+
     def load_bin(self, binfile_path, fortrain=True):
         # Record centroid history for analysis purpose
         centroidX_his = []
@@ -79,7 +89,7 @@ class data_preproc:
             processed_pattern  = []
             for frame in pattern:
                 processed_frame = []
-                for point in frame:        
+                for point in frame:
                     # Get the original point information.
                     pointR, pointAZ, pointEL, pointD, pointSNR, pointNoise = point[9], point[10], point[11], point[12], point[13], point[14]
 
@@ -91,7 +101,7 @@ class data_preproc:
                     pointX      = results[0]
                     pointY      = results[1]
                     pointZ      = results[2] + self.height
-                    
+
                     # Subtract the point's position from the centroid in the very first frame in a motion pattern
                     delta_x     = pointX - centroidX
                     delta_y     = pointY - centroidY
@@ -104,11 +114,11 @@ class data_preproc:
                     processed_frame.append(feature_vector[0:self.features_per_point]) # Only keep 3D spatial info and the Doppler
                 processed_pattern.append(processed_frame)
                 # Do the data oversampling proposed in the paper
-                processed_pattern_oversampled = self.proposed_oversampling(processed_pattern)
+            processed_pattern_oversampled = self.proposed_oversampling(processed_pattern) # UPDATE - change this line to be done once per frame, not on every frame
             total_processed_pattern.append(processed_pattern_oversampled)
 
         total_processed_pattern_np = np.array(total_processed_pattern)
-        
+
         # Train and test split
         split_idx   = int(total_processed_pattern_np.shape[0]*self.split_ratio)
         traindata   = total_processed_pattern_np[0:split_idx]
@@ -153,8 +163,8 @@ class data_preproc:
             processed_pointcloud_oversampled.append(frame_oversampled)
 
         processed_pointcloud_oversampled_np = np.array(processed_pointcloud_oversampled)
-        assert (processed_pointcloud_oversampled_np.shape[-2] == self.points_per_frame), ("ERROR: The new_frame_data has different number of points per frame rather than %s!" %(self.points_per_frame))    
-        assert (processed_pointcloud_oversampled_np.shape[-1] == self.features_per_point), ("ERROR: The new_frame_data has different feature length rather than %s!" %(self.features_per_point))    
+        assert (processed_pointcloud_oversampled_np.shape[-2] == self.points_per_frame), ("ERROR: The new_frame_data has different number of points per frame rather than %s!" %(self.points_per_frame))
+        assert (processed_pointcloud_oversampled_np.shape[-1] == self.features_per_point), ("ERROR: The new_frame_data has different feature length rather than %s!" %(self.features_per_point))
 
         return processed_pointcloud_oversampled_np
 
@@ -162,57 +172,117 @@ class autoencoder_mdl:
     def __init__(self, model_dir):
         self.model_dir = model_dir
 
-    # Variational Recurrent Autoencoder (HVRAE)
-    def HVRAE_train(self, train_data, test_data):
-        # In one motion pattern we have
+    # --- NEW: Shared Helper Function to Build Model Structure ---
+    def _build_HVRAE_architecture(self):
+        # Model Parameters
         n_frames       = 10
         n_points       = 64
         n_features     = 4
-        
-        # Dimension is going down for encoding. Decoding is just a reflection of encoding.
-        n_intermidiate    = 64
-        n_latentdim       = 16
-        
+        n_intermidiate = 64
+        n_latentdim    = 16
+
         # Define input
-        inputs                  = Input(shape=(n_frames, n_points, n_features))
-        input_flatten           = TimeDistributed(Flatten(None))(inputs)
+        inputs          = Input(shape=(n_frames, n_points, n_features))
+        input_flatten   = TimeDistributed(Flatten(data_format='channels_last'))(inputs)
 
-        # VAE: q(z|X). Input: motion pattern. Output: mean and log(sigma^2) for q(z|X).
-        input_flatten           = TimeDistributed(Dense(n_intermidiate, activation='tanh'))(input_flatten)
-        Z_mean                  = TimeDistributed(Dense(n_latentdim, activation=None), name='qzx_mean')(input_flatten)
-        Z_log_var               = TimeDistributed(Dense(n_latentdim, activation=None), name='qzx_log_var')(input_flatten)
-        def sampling(args): # Instead of sampling from Q(z|X), sample epsilon = N(0,I), z = z_mean + sqrt(var) * epsilon
+        # VAE Encoder: q(z|X)
+        input_flatten   = TimeDistributed(Dense(n_intermidiate, activation='tanh'))(input_flatten)
+        Z_mean          = TimeDistributed(Dense(n_latentdim, activation=None), name='qzx_mean')(input_flatten)
+        Z_log_var       = TimeDistributed(Dense(n_latentdim, activation=None), name='qzx_log_var')(input_flatten)
+
+        # Sampling Function (The "Lambda" logic)
+        def sampling(args):
             Z_mean, Z_log_var   = args
-            batch_size          = K.shape(Z_mean)[0]
-            n_frames            = K.int_shape(Z_mean)[1]
-            n_latentdim         = K.int_shape(Z_mean)[2]
-            # For reproducibility, we set the seed=37
-            epsilon             = K.random_normal(shape=(batch_size, n_frames, n_latentdim), mean=0., stddev=1.0, seed=None)
-            Z                   = Z_mean + K.exp(0.5*Z_log_var) * epsilon # The reparameterization trick
-            return  Z
-        # VAE: sampling z ~ q(z|X) using reparameterization trick. Output: samples of z.
-        Z                       = Lambda(sampling)([Z_mean, Z_log_var])
 
-        # RNN Autoencoder. Output: reconstructed z.
-        encoder_feature         = SimpleRNN(n_latentdim, activation='tanh', return_sequences=False)(Z)
-        decoder_feature         = RepeatVector(n_frames)(encoder_feature)
-        decoder_feature         = SimpleRNN(n_latentdim, activation='tanh', return_sequences=True)(decoder_feature)
-        decoder_feature         = Lambda(lambda x: tf.reverse(x, axis=[-2]))(decoder_feature)
+            # 1. Get the full shape as a tensor (works for dynamic & static dims)
+            shape               = tf.shape(Z_mean)
+            batch_size          = shape[0]
+            n_frames            = shape[1]
+            n_latentdim         = shape[2]
 
-        # VAE: p(X|z). Output: mean and log(sigma^2) for p(X|z).
-        X_latent                = TimeDistributed(Dense(n_intermidiate, activation='tanh'))(decoder_feature)
-        pXz_mean                = TimeDistributed(Dense(n_features, activation=None))(X_latent)
-        pXz_logvar              = TimeDistributed(Dense(n_features, activation=None))(X_latent)
+            # 2. Generate noise using standard TF
+            epsilon             = tf.random.normal(shape=(batch_size, n_frames, n_latentdim), mean=0., stddev=1.0)
 
-        # Reshape the output. Output: (n_frames, n_points, n_features*2).
-        # In each frame, every point has a corresponding mean vector with length of n_features and a log(sigma^2) vector with length of n_features.
-        pXz                     = Concatenate()([pXz_mean, pXz_logvar])
-        pXz                     = TimeDistributed(RepeatVector(n_points))(pXz)
-        outputs                 = TimeDistributed(Reshape((n_points, n_features*2)))(pXz)
+            # 3. Apply the reparameterization trick
+            return Z_mean + tf.exp(0.5 * Z_log_var) * epsilon
 
-        # Build the model
-        self.HVRAE_mdl = Model(inputs, outputs)
-        print(self.HHVRAE_mdl.summary())
+        # Lambda Layer
+        Z = Lambda(sampling, output_shape=(n_frames, n_latentdim))([Z_mean, Z_log_var])
+
+        # RNN Autoencoder
+        encoder_feature = SimpleRNN(n_latentdim, activation='tanh', return_sequences=False)(Z)
+        decoder_feature = RepeatVector(n_frames)(encoder_feature)
+        decoder_feature = SimpleRNN(n_latentdim, activation='tanh', return_sequences=True)(decoder_feature)
+        decoder_feature = Lambda(lambda x: tf.reverse(x, axis=[-2]))(decoder_feature)
+
+        # VAE Decoder: p(X|z)
+        X_latent        = TimeDistributed(Dense(n_intermidiate, activation='tanh'))(decoder_feature)
+        pXz_mean        = TimeDistributed(Dense(n_features, activation=None))(X_latent)
+        pXz_logvar      = TimeDistributed(Dense(n_features, activation=None))(X_latent)
+
+        # Reshape Output
+        pXz     = Concatenate()([pXz_mean, pXz_logvar])
+        pXz     = TimeDistributed(RepeatVector(n_points))(pXz)
+        outputs = TimeDistributed(Reshape((n_points, n_features*2)))(pXz)
+
+        # Return the uncompiled model
+        return Model(inputs, outputs), Z_log_var, Z_mean
+
+    # # Variational Recurrent Autoencoder (HVRAE)
+    # def HVRAE_train(self, train_data, test_data):
+    #     # In one motion pattern we have
+    #     n_frames       = 10
+    #     n_points       = 64
+    #     n_features     = 4
+
+    #     # Dimension is going down for encoding. Decoding is just a reflection of encoding.
+    #     n_intermidiate    = 64
+    #     n_latentdim       = 16
+
+    #     # Define input
+    #     inputs                  = Input(shape=(n_frames, n_points, n_features))
+    #     input_flatten           = TimeDistributed(Flatten(None))(inputs)
+
+    #     # VAE: q(z|X). Input: motion pattern. Output: mean and log(sigma^2) for q(z|X).
+    #     input_flatten           = TimeDistributed(Dense(n_intermidiate, activation='tanh'))(input_flatten)
+    #     Z_mean                  = TimeDistributed(Dense(n_latentdim, activation=None), name='qzx_mean')(input_flatten)
+    #     Z_log_var               = TimeDistributed(Dense(n_latentdim, activation=None), name='qzx_log_var')(input_flatten)
+    #     def sampling(args): # Instead of sampling from Q(z|X), sample epsilon = N(0,I), z = z_mean + sqrt(var) * epsilon
+    #         Z_mean, Z_log_var   = args
+    #         batch_size          = K.shape(Z_mean)[0]
+    #         n_frames            = K.int_shape(Z_mean)[1]
+    #         n_latentdim         = K.int_shape(Z_mean)[2]
+    #         # For reproducibility, we set the seed=37
+    #         epsilon             = K.random_normal(shape=(batch_size, n_frames, n_latentdim), mean=0., stddev=1.0, seed=None)
+    #         Z                   = Z_mean + K.exp(0.5*Z_log_var) * epsilon # The reparameterization trick
+    #         return  Z
+    #     # VAE: sampling z ~ q(z|X) using reparameterization trick. Output: samples of z.
+    #     Z                       = Lambda(sampling)([Z_mean, Z_log_var])
+
+    #     # RNN Autoencoder. Output: reconstructed z.
+    #     encoder_feature         = SimpleRNN(n_latentdim, activation='tanh', return_sequences=False)(Z)
+    #     decoder_feature         = RepeatVector(n_frames)(encoder_feature)
+    #     decoder_feature         = SimpleRNN(n_latentdim, activation='tanh', return_sequences=True)(decoder_feature)
+    #     decoder_feature         = Lambda(lambda x: tf.reverse(x, axis=[-2]))(decoder_feature)
+
+    #     # VAE: p(X|z). Output: mean and log(sigma^2) for p(X|z).
+    #     X_latent                = TimeDistributed(Dense(n_intermidiate, activation='tanh'))(decoder_feature)
+    #     pXz_mean                = TimeDistributed(Dense(n_features, activation=None))(X_latent)
+    #     pXz_logvar              = TimeDistributed(Dense(n_features, activation=None))(X_latent)
+
+    #     # Reshape the output. Output: (n_frames, n_points, n_features*2).
+    #     # In each frame, every point has a corresponding mean vector with length of n_features and a log(sigma^2) vector with length of n_features.
+    #     pXz                     = Concatenate()([pXz_mean, pXz_logvar])
+    #     pXz                     = TimeDistributed(RepeatVector(n_points))(pXz)
+    #     outputs                 = TimeDistributed(Reshape((n_points, n_features*2)))(pXz)
+
+    #     # Build the model
+    #     self.HVRAE_mdl = Model(inputs, outputs)
+    #     print(self.HHVRAE_mdl.summary())
+    def HVRAE_train(self, train_data, test_data):
+        # Build the model architecture
+        self.HVRAE_mdl, Z_log_var, Z_mean = self._build_HVRAE_architecture()
+        print(self.HVRAE_mdl.summary())
 
         # Calculate HVRAE loss proposed in the paper
         def HVRAE_loss(y_true, y_pred):
@@ -224,15 +294,15 @@ class autoencoder_mdl:
             logvar          = y_pred[:, :, :, n_features:]
             var             = K.exp(logvar)
 
-            y_true_reshape  = K.reshape(y_true, (batch_size, n_frames, -1)) 
-            mean            = K.reshape(mean, (batch_size, n_frames, -1)) 
-            var             = K.reshape(var, (batch_size, n_frames, -1)) 
-            logvar          = K.reshape(logvar, (batch_size, n_frames, -1)) 
+            y_true_reshape  = K.reshape(y_true, (batch_size, n_frames, -1))
+            mean            = K.reshape(mean, (batch_size, n_frames, -1))
+            var             = K.reshape(var, (batch_size, n_frames, -1))
+            logvar          = K.reshape(logvar, (batch_size, n_frames, -1))
 
             # E[log_pXz] ~= log_pXz
             log_pXz         = K.square(y_true_reshape - mean)/var
             log_pXz         = K.sum(0.5*log_pXz, axis=-1)
-            
+
             # KL divergence between q(z|x) and p(z)
             kl_loss         = -0.5 * K.sum(1 + Z_log_var - K.square(Z_mean) - K.exp(Z_log_var), axis=-1)
 
@@ -241,7 +311,7 @@ class autoencoder_mdl:
             return HVRAE_loss
 
         # Define stochastic gradient descent optimizer Adam
-        adam    = optimizers.Adam(lr=0.001, beta_1=0.9, beta_2=0.999, amsgrad=False)
+        adam    = optimizers.Adam(learning_rate=0.001, beta_1=0.9, beta_2=0.999, amsgrad=False)
         # Compile the model
         self.HVRAE_mdl.compile(optimizer=adam, loss=HVRAE_loss)
 
@@ -262,31 +332,34 @@ class autoencoder_mdl:
 
         def sampling_predict(args): # Instead of sampling from Q(z|X), sample epsilon = N(0,I), z = z_mean + sqrt(var) * epsilon
             Z_mean, Z_log_var   = args
-            batch_size          = K.shape(Z_mean)[0]
-            n_frames            = K.int_shape(Z_mean)[1]
-            n_latentdim         = K.int_shape(Z_mean)[2]
-            # For reproducibility, we set the seed=37
-            epsilon             = K.random_normal(shape=(batch_size, n_frames, n_latentdim), mean=0., stddev=1.0, seed=None)
-            Z                   = Z_mean + K.exp(0.5*Z_log_var) * epsilon # The reparameterization trick
-            return  Z
+
+            # 1. Get the full shape as a tensor (works for dynamic & static dims)
+            shape               = tf.shape(Z_mean)
+            batch_size          = shape[0]
+            n_frames            = shape[1]
+            n_latentdim         = shape[2]
+
+            # 2. Generate noise using standard TF
+            epsilon             = tf.random.normal(shape=(batch_size, n_frames, n_latentdim), mean=0., stddev=1.0)
+
+            # 3. Apply the reparameterization trick
+            return Z_mean + tf.exp(0.5 * Z_log_var) * epsilon
+
 
         # Load saved model
         # model = load_model(self.model_dir + 'HVRAE_mdl.h5', compile = False, safe_mode=False, custom_objects={
-        #                                                         'sampling': sampling_predict, 
-        #                                                         'tf': tf, 
+        #                                                         'sampling': sampling_predict,
+        #                                                         'tf': tf,
         #                                                         'Flatten': Flatten,
         #                                                         'Dense': Dense})
-        model = load_model(self.model_dir + 'HVRAE_mdl.h5', compile = False, custom_objects={
-                                                                'sampling': sampling_predict, 
-                                                                'tf': tf})
         # 1. Build the empty structure using your local code
         # (This sets up all the custom objects, layers, and lambdas automatically)
-        # model = self._build_architecture() 
+        model = self._build_HVRAE_architecture()[0]
 
-        # # 2. Fill it with the trained numbers
-        # model.load_weights(self.model_dir + 'HVRAE_mdl.h5')
-        
-        adam  = optimizers.Adam(lr=0.001, beta_1=0.9, beta_2=0.999, amsgrad=False)
+        # 2. Fill it with the trained numbers
+        model.load_weights(self.model_dir + 'HVRAE_mdl.h5')
+
+        adam  = optimizers.Adam(learning_rate=0.001, beta_1=0.9, beta_2=0.999, amsgrad=False)
         # Because we do not train the model, the loss function does not matter here.
         # Adding MSE as loss is omly for compiling the model. We can add any loss function here.
         # This is because our HVRAE loss function is customized function, we can not simply add it here.
@@ -307,16 +380,16 @@ class autoencoder_mdl:
             logvar          = y_pred[:, :, :, n_features:]
             var             = np.exp(logvar)
 
-            y_true_reshape  = np.reshape(y_true, (batch_size, n_frames, -1)) 
-            mean            = np.reshape(mean, (batch_size, n_frames, -1)) 
-            var             = np.reshape(var, (batch_size, n_frames, -1)) 
-            logvar          = np.reshape(logvar, (batch_size, n_frames, -1)) 
+            y_true_reshape  = np.reshape(y_true, (batch_size, n_frames, -1))
+            mean            = np.reshape(mean, (batch_size, n_frames, -1))
+            var             = np.reshape(var, (batch_size, n_frames, -1))
+            logvar          = np.reshape(logvar, (batch_size, n_frames, -1))
 
             # E[log_pXz] ~= log_pXz
             # log_pXz       = K.square(y_true_reshape-mean)/var + logvar
             log_pXz         = np.square(y_true_reshape - mean)/var
             log_pXz         = np.sum(0.5*log_pXz, axis=-1)
-            
+
             # KL divergence between q(z|x) and p(z)
             kl_loss         = -0.5 * np.sum(1 + Z_log_var - np.square(Z_mean) - np.exp(Z_log_var), axis=-1)
 
@@ -333,7 +406,7 @@ class autoencoder_mdl:
             predicted_z_mean    = get_z_mean_model.predict(pattern, batch_size=1)
             predicted_z_log_var = get_z_log_var_model.predict(pattern, batch_size=1)
             # Call the HVRAE_loss function
-            # The HVRAE_loss function input is: 
+            # The HVRAE_loss function input is:
             # Model input motion pattern, model output mean and logvar of p(X|z), mean of q(z|X), logvar of q(z|X)
             current_loss        = HVRAE_loss(pattern, current_prediction, predicted_z_mean, predicted_z_log_var)
             loss_history.append(current_loss)
@@ -341,17 +414,16 @@ class autoencoder_mdl:
 
         return loss_history
 
-    # Baseline #1: HVRAE_SL with simplified loss function
-    def HVRAE_SL_train(self, train_data, test_data):
-        # In one motion pattern we have
+
+    def _build_HVRAE_SL_architecture(self):
         n_frames       = 10
         n_points       = 64
         n_features     = 4
-        
+
         # Dimension is going down for encoding. Decoding is just a reflection of encoding.
         n_intermidiate    = 64
         n_latentdim       = 16
-        
+
         # Define input
         inputs                  = Input(shape=(n_frames, n_points, n_features))
         input_flatten           = TimeDistributed(Flatten(None))(inputs)
@@ -362,13 +434,19 @@ class autoencoder_mdl:
         Z_log_var               = TimeDistributed(Dense(n_latentdim, activation=None), name='qzx_log_var')(input_flatten)
         def sampling(args): # Instead of sampling from Q(z|X), sample epsilon = N(0,I), z = z_mean + sqrt(var) * epsilon
             Z_mean, Z_log_var   = args
-            batch_size          = K.shape(Z_mean)[0]
-            n_frames            = K.int_shape(Z_mean)[1]
-            n_latentdim         = K.int_shape(Z_mean)[2]
-            # For reproducibility, we set the seed=37
-            epsilon             = K.random_normal(shape=(batch_size, n_frames, n_latentdim), mean=0., stddev=1.0, seed=None)
-            Z                   = Z_mean + K.exp(0.5*Z_log_var) * epsilon # The reparameterization trick
-            return  Z
+
+            # 1. Get the full shape as a tensor (works for dynamic & static dims)
+            shape               = tf.shape(Z_mean)
+            batch_size          = shape[0]
+            n_frames            = shape[1]
+            n_latentdim         = shape[2]
+
+            # 2. Generate noise using standard TF
+            epsilon             = tf.random.normal(shape=(batch_size, n_frames, n_latentdim), mean=0., stddev=1.0)
+
+            # 3. Apply the reparameterization trick
+            return Z_mean + tf.exp(0.5 * Z_log_var) * epsilon
+
         # VAE: sampling z ~ q(z|X) using reparameterization trick. Output: samples of z.
         Z                       = Lambda(sampling)([Z_mean, Z_log_var])
 
@@ -380,15 +458,19 @@ class autoencoder_mdl:
 
         # VAE: p(X|z). Output: mean for p(X|z).
         X_latent                = TimeDistributed(Dense(n_intermidiate, activation='tanh'))(decoder_feature)
-        pXz_mean                = TimeDistributed(Dense(n_features, activation=None))(X_latent)
+        pXz_mean                = TimeDistributed(Dense(n_points * n_features, activation=None))(X_latent)
 
-        # Reshape the output. Output: (n_frames, n_points, n_features*2).
+        # Reshape the output. Output: (n_frames, n_points, n_features).
         # In each frame, every point has a corresponding mean vector with length of n_features.
-        pXz_mean                = TimeDistributed(RepeatVector(n_points))(pXz_mean)
         outputs                 = TimeDistributed(Reshape((n_points, n_features)))(pXz_mean)
+        return Model(inputs, outputs), Z_log_var, Z_mean
+
+    # Baseline #1: HVRAE_SL with simplified loss function
+    def HVRAE_SL_train(self, train_data, test_data):
+        # In one motion pattern we have
 
         # Build the model
-        self.HVRAE_SL_mdl = Model(inputs, outputs)
+        self.HVRAE_SL_mdl, Z_log_var, Z_mean = self._build_HVRAE_SL_architecture()
         print(self.HVRAE_SL_mdl.summary())
 
         # Calculate HVRAE loss proposed in the paper
@@ -399,15 +481,15 @@ class autoencoder_mdl:
 
             mean            = y_pred
 
-            y_true_reshape  = K.reshape(y_true, (batch_size, n_frames, -1)) 
-            mean            = K.reshape(mean, (batch_size, n_frames, -1)) 
+            y_true_reshape  = K.reshape(y_true, (batch_size, n_frames, -1))
+            mean            = K.reshape(mean, (batch_size, n_frames, -1))
 
             # E[log_pXz] ~= log_pXz
             # In this case, the loss is MSE
             log_pXz         = K.square(y_true_reshape - mean)
             log_pXz         = K.sum(0.5*log_pXz, axis=-1)
             log_pXz         = mse(y_true_reshape, mean)
-            
+
             # KL divergence between q(z|x) and p(z)
             kl_loss         = -0.5 * K.sum(1 + Z_log_var - K.square(Z_mean) - K.exp(Z_log_var), axis=-1)
 
@@ -416,7 +498,7 @@ class autoencoder_mdl:
             return HVRAE_loss
 
         # Define stochastic gradient descent optimizer Adam
-        adam    = optimizers.Adam(lr=0.001, beta_1=0.9, beta_2=0.999, amsgrad=False)
+        adam    = optimizers.Adam(learning_rate=0.001, beta_1=0.9, beta_2=0.999, amsgrad=False)
         # Compile the model
         self.HVRAE_SL_mdl.compile(optimizer=adam, loss=HVRAE_loss)
 
@@ -430,24 +512,45 @@ class autoencoder_mdl:
         self.HVRAE_SL_mdl.save(self.model_dir + 'HVRAE_SL_mdl_online.h5')
         # plot_model(self.HVRAE_SL_mdl, show_shapes =True, to_file=self.model_dir+'HVRAE_SL_mdl_online.png')
         print("INFO: Training is done!")
-        print("*********************************************************************")  
+        print("*********************************************************************")
 
     def HVRAE_SL_predict(self, inferencedata):
         K.clear_session()
 
         def sampling_predict(args): # Instead of sampling from Q(z|X), sample epsilon = N(0,I), z = z_mean + sqrt(var) * epsilon
             Z_mean, Z_log_var   = args
-            batch_size          = K.shape(Z_mean)[0]
-            n_frames            = K.int_shape(Z_mean)[1]
-            n_latentdim         = K.int_shape(Z_mean)[2]
-            # For reproducibility, we set the seed=37
-            epsilon             = K.random_normal(shape=(batch_size, n_frames, n_latentdim), mean=0., stddev=1.0, seed=None)
-            Z                   = Z_mean + K.exp(0.5*Z_log_var) * epsilon # The reparameterization trick
-            return  Z 
+
+            # 1. Get the full shape as a tensor (works for dynamic & static dims)
+            shape               = tf.shape(Z_mean)
+            batch_size          = shape[0]
+            n_frames            = shape[1]
+            n_latentdim         = shape[2]
+
+            # 2. Generate noise using standard TF
+            epsilon             = tf.random.normal(shape=(batch_size, n_frames, n_latentdim), mean=0., stddev=1.0)
+
+            # 3. Apply the reparameterization trick
+            return Z_mean + tf.exp(0.5 * Z_log_var) * epsilon
+
+            # Z_mean, Z_log_var   = args
+            # batch_size          = K.shape(Z_mean)[0]
+            # n_frames            = K.int_shape(Z_mean)[1]
+            # n_latentdim         = K.int_shape(Z_mean)[2]
+            # # For reproducibility, we set the seed=37
+            # epsilon             = K.random_normal(shape=(batch_size, n_frames, n_latentdim), mean=0., stddev=1.0, seed=None)
+            # Z                   = Z_mean + K.exp(0.5*Z_log_var) * epsilon # The reparameterization trick
+            # return  Z
 
         # Load the saved model
-        model = load_model(self.model_dir + 'HVRAE_SL_mdl.h5', compile = False, custom_objects={'sampling': sampling_predict, 'tf': tf})
-        adam  = optimizers.Adam(lr=0.001, beta_1=0.9, beta_2=0.999, amsgrad=False)
+        # model = load_model(self.model_dir + 'HVRAE_SL_mdl.h5', compile = False, custom_objects={'sampling': sampling_predict, 'tf': tf})
+
+        # 1. Build the empty structure using your local code
+        # (This sets up all the custom objects, layers, and lambdas automatically)
+        model = self._build_HVRAE_SL_architecture()[0]
+
+        # 2. Fill it with the trained numbers
+        model.load_weights(self.model_dir + 'HVRAE_SL_mdl.h5')
+        adam  = optimizers.Adam(learning_rate=0.001, beta_1=0.9, beta_2=0.999, amsgrad=False)
         # Because we do not train the model, the loss function does not matter here.
         # Adding MSE as loss is omly for compiling the model. We can add any loss function here.
         # This is because our HVRAE loss function is customized function, we can not simply add it here.
@@ -466,15 +569,15 @@ class autoencoder_mdl:
 
             mean            = y_pred
 
-            y_true_reshape  = np.reshape(y_true, (batch_size, n_frames, -1)) 
-            mean            = np.reshape(mean, (batch_size, n_frames, -1)) 
+            y_true_reshape  = np.reshape(y_true, (batch_size, n_frames, -1))
+            mean            = np.reshape(mean, (batch_size, n_frames, -1))
 
             # E[log_pXz] ~= log_pXz
             # In this case, the loss is MSE
             # log_pXz         = np.square(y_true_reshape - mean)
             # log_pXz         = np.sum(0.5*log_pXz, axis=-1)
             log_pXz         = (np.square(y_true_reshape - mean)).mean(axis=-1)
-            
+
             # KL divergence between q(z|x) and p(z)
             kl_loss         = -0.5 * np.sum(1 + Z_log_var - np.square(Z_mean) - np.exp(Z_log_var), axis=-1)
 
@@ -491,7 +594,7 @@ class autoencoder_mdl:
             predicted_z_mean    = get_z_mean_model.predict(pattern, batch_size=1)
             predicted_z_log_var = get_z_log_var_model.predict(pattern, batch_size=1)
             # Call the HVRAE_loss function
-            # The HVRAE_loss function input is: 
+            # The HVRAE_loss function input is:
             # Model input motion pattern, model output mean and logvar of p(X|z), mean of q(z|X), logvar of q(z|X)
             current_loss        = HVRAE_loss(pattern, current_prediction, predicted_z_mean, predicted_z_log_var)
             loss_history.append(current_loss)
@@ -499,17 +602,17 @@ class autoencoder_mdl:
 
         return loss_history
 
-    # Baseline #2: Recurrent AE
-    def RAE_train(self, train_data, test_data):
+
+    def _build_RAE_architecture(self):
         # In one motion pattern we have
         n_frames       = 10
         n_points       = 64
         n_features     = 4
-        
+
         # Dimension is going down for encoding. Decoding is just a reflection of encoding.
         n_intermidiate    = 64
         n_latentdim       = 16
-        
+
         # Define input
         inputs                  = Input(shape=(n_frames, n_points, n_features))
         input_flatten           = TimeDistributed(Flatten(None))(inputs)
@@ -530,13 +633,18 @@ class autoencoder_mdl:
 
         # Reshape
         outputs                 = TimeDistributed(Reshape((n_points, n_features)))(decoder_feature)
+        return Model(inputs, outputs)
+
+    # Baseline #2: Recurrent AE
+    def RAE_train(self, train_data, test_data):
+
 
         # Build the model
-        self.RAE_mdl = Model(inputs, outputs)
+        self.RAE_mdl = self._build_RAE_architecture()
         print(self.RAE_mdl.summary())
 
         # Define stochastic gradient descent optimizer Adam
-        adam    = optimizers.Adam(lr=0.001, beta_1=0.9, beta_2=0.999, amsgrad=False)
+        adam    = optimizers.Adam(learning_rate=0.001, beta_1=0.9, beta_2=0.999, amsgrad=False)
         # Compile the model
         self.RAE_mdl.compile(optimizer=adam, loss=mse)
 
@@ -550,13 +658,19 @@ class autoencoder_mdl:
         self.RAE_mdl.save(self.model_dir + 'RAE_mdl_online.h5')
         # plot_model(self.RAE_mdl, show_shapes =True, to_file=self.model_dir+'RAE_mdl_online.png')
         print("INFO: Training is done!")
-        print("*********************************************************************")  
+        print("*********************************************************************")
 
     def RAE_predict(self, inferencedata):
         K.clear_session()
 
         # Load the saved model
-        model = load_model(self.model_dir + 'RAE_mdl.h5', compile = True, custom_objects={'tf': tf})
+        # model = load_model(self.model_dir + 'RAE_mdl.h5', compile = True, custom_objects={'tf': tf})
+        model = self._build_RAE_architecture()
+
+        # 2. Fill it with the trained numbers
+        model.load_weights(self.model_dir + 'RAE_mdl.h5')
+        model.compile(loss=mse)
+
         # plot_model(model, show_shapes =True, to_file=self.model_dir+'RAE_model.png')
         print("INFO: Start to predict...")
         prediction_history  = []
@@ -568,6 +682,14 @@ class autoencoder_mdl:
         print("INFO: Prediction is done!")
 
         return loss_history
+
+
+
+
+# ----------------------------------------------------------------------------
+
+# Cell 4
+
 
 class compute_metric:
     def __init__(self):
@@ -581,7 +703,7 @@ class compute_metric:
         i                       = int(win_len/2)
         detected_falls_idx      = []
         # Firstly, detect the fall centers based on the centroidZ drop
-        while i < (seq_len - win_len/2): 
+        while i < (seq_len - win_len/2):
             detection_window_middle  = i
             detection_window_lf_edge = int(detection_window_middle - win_len/2)
             detection_window_rh_edge = int(detection_window_middle + win_len/2)
@@ -597,7 +719,7 @@ class compute_metric:
             j = i
             while True:
                 if j == len(detected_falls_idx):
-                    break 
+                    break
                 if detected_falls_idx[j] - detected_falls_idx[i] > win_len:
                     break
                 j += 1
@@ -609,7 +731,7 @@ class compute_metric:
         fall_binseq                 = np.zeros(seq_len)
         fall_binseq[ones_idx]       = 1
         final_detected_falls_idx    = []
-        i = 0 
+        i = 0
         while i < len(processed_detected_falls_idx):
             detection_window_middle  = int(processed_detected_falls_idx[i])
             detection_window_lf_edge = int(detection_window_middle - win_len/2)
@@ -617,7 +739,7 @@ class compute_metric:
             if 1 in fall_binseq[detection_window_lf_edge:detection_window_rh_edge]:
                 final_detected_falls_idx.append(processed_detected_falls_idx[i])
             i += 1
-        
+
         return final_detected_falls_idx, len(processed_detected_falls_idx)
 
     def find_tpfpfn(self, detected_falls_idx, gt_falls_idx):
@@ -633,7 +755,7 @@ class compute_metric:
                 # Find a gt fall index whose window covers the detected fall index, so it's true positive
                 if int(falls_fn[j]-win_len/2) <= detected_falls_idx[i] <= int(falls_fn[j]+win_len/2):
                     # Remove the true positive from the gt_falls_idx list, finally only false negative remains
-                    falls_fn.pop(j)  
+                    falls_fn.pop(j)
                     falls_tp.append(i)
                     break
                 j += 1
@@ -655,7 +777,7 @@ class compute_metric:
             # Save the number of false positve, or missed fall detection, for this threshold
             fpr.append(len(falls_fp))
         return tpr, fpr
-    
+
 
 class compute_metric_predict:
     def __init__(self):
@@ -672,7 +794,7 @@ class compute_metric_predict:
         while i < (seq_len - 1): # checking all frames up to the -1 last one, that will predict fall in the last frame
             start_win, end_win = i - (win_len-1), i
             # Search the centroidZ drop
-            if centroidZ_history[end_win] - centroidZ_history[start_win] >= centroidZ_dropthres:
+            if centroidZ_history[start_win] - centroidZ_history[end_win] >= centroidZ_dropthres:
                 detected_falls_idx.append(int(end_win))
             i += 1
 
@@ -683,11 +805,11 @@ class compute_metric_predict:
             j = i
             while True:
                 if j == len(detected_falls_idx):
-                    break 
+                    break
                 if detected_falls_idx[j] - detected_falls_idx[i] > win_len:
                     break
                 j += 1
-            processed_detected_falls_idx.append(i) ## put the first index - 'predict' the fall  
+            processed_detected_falls_idx.append(i) ## put the first index - 'predict' the fall
             i = j
 
         # Thirdly, find id there is an anomaly level (or loss history) spike in the detection window
@@ -695,14 +817,14 @@ class compute_metric_predict:
         fall_binseq                 = np.zeros(seq_len)
         fall_binseq[ones_idx]       = 1
         final_detected_falls_idx    = []
-        i = 0 
+        i = 0
         while i < len(processed_detected_falls_idx):
             detection_window_end  = int(processed_detected_falls_idx[i])
             detection_window_start = detection_window_end - (win_len-1)
             if 1 in fall_binseq[detection_window_start:detection_window_end]:
                 final_detected_falls_idx.append(detection_window_end)
             i += 1
-        
+
         return final_detected_falls_idx, len(processed_detected_falls_idx)
 
     def find_tpfpfn(self, detected_falls_idx, gt_falls_idx):
@@ -718,7 +840,7 @@ class compute_metric_predict:
                 # Find a gt fall index whose window covers the detected fall index, so it's true positive
                 if detected_falls_idx[i] <= int(falls_fn[j]+win_len/2):
                     # Remove the true positive from the gt_falls_idx list, finally only false negative remains
-                    falls_fn.pop(j)  
+                    falls_fn.pop(j)
                     falls_tp.append(i)
                     break
                 j += 1
@@ -741,7 +863,7 @@ class compute_metric_predict:
             # Save the number of false positve, or missed fall detection, for this threshold
             fpr.append(len(falls_fp))
         return tpr, fpr
-    
+
     def cal_roc_centroid(self, loss_history, centroidZ_history, gt_falls_idx):
         n_gt_falls = len(gt_falls_idx)
         print("How many falls?", n_gt_falls)
@@ -755,198 +877,452 @@ class compute_metric_predict:
             # Save the number of false positve, or missed fall detection, for this threshold
             fpr.append(len(falls_fp))
         return tpr, fpr
-    
-
-    if __name__ == '__main__':
-
-        project_path = '/mnt/c/Users/idosy/uni_projects/mmfall/'
-            # Load inference dataset and the ground truth timesheet
-        inferencedata_file                      = project_path + 'data/DS1/DS1_4falls'
-        inferencedata, centroidZ_history        = data_preproc().load_bin(inferencedata_file + '.npy', fortrain=False)
-        # Ground truth time index file exists
-        if os.path.exists(inferencedata_file + '.csv'): 
-            gt_falls_idx                        = np.genfromtxt(inferencedata_file + '.csv', delimiter=',').astype(int)
-        # Maybe this file doesn't contain any falls
-        else: 
-            gt_falls_idx                        = []
-
-        # Load the models
-        model                                   = autoencoder_mdl(model_dir = project_path + 'saved_model/')
-
-        HVRAE_loss_history                       = model.HVRAE_predict(inferencedata)
-        plt.figure()
-        plt.ylim(0.0, 2.2)
-        plt.xlabel("Time in Seconds")
-        time_step = np.arange(0, len(centroidZ_history))*0.1 # 0.1 seconds per frame
-        plt.plot(time_step, centroidZ_history, linewidth=2, label='Centroid Height')
-        plt.plot(time_step, HVRAE_loss_history, linewidth=2, label='Anomaly Level')
-        plt.legend(loc="upper right")
-        plt.title('HVRAE Results')
-        plt.savefig(inferencedata_file+'_HVRAE_prediction.png')
-        plt.show()
-
-        HVRAE_SL_loss_history                    = model.HVRAE_SL_predict(inferencedata)
-        plt.figure()
-        plt.ylim(0.0, 2.2)
-        plt.xlabel("Time in Seconds")
-        time_step = np.arange(0, len(centroidZ_history))*0.1 # 0.1 seconds per frame
-        plt.plot(time_step, centroidZ_history, linewidth=2, label='Centroid Height')
-        plt.plot(time_step, HVRAE_SL_loss_history, linewidth=2, label='Anomaly Level')
-        plt.legend(loc="upper right")
-        plt.title('HVRAE_SL Results')
-        plt.savefig(inferencedata_file+'_HVRAE_SL_prediction.png')
-        plt.show()
-
-        RAE_loss_history                        = model.RAE_predict(inferencedata)
-        plt.figure()
-        plt.ylim(0.0, 2.2)
-        plt.xlabel("Time in Seconds")
-        time_step = np.arange(0, len(centroidZ_history))*0.1 # 0.1 seconds per frame
-        plt.plot(time_step, centroidZ_history, linewidth=2, label='Centroid Height')
-        plt.plot(time_step, RAE_loss_history, linewidth=2, label='Anomaly Level')
-        plt.legend(loc="upper right")
-        plt.title('RAE Results')
-        plt.savefig(inferencedata_file+'_RAE_prediction.png')
-        plt.show()
 
 
-        ### section 2 ###
-            # Load inference dataset and the ground truth timesheet
-        inferencedata_file                      = project_path + 'data/DS1/DS1_4normal'
-        inferencedata, centroidZ_history        = data_preproc().load_bin(inferencedata_file + '.npy', fortrain=False)
-        # Ground truth time index file exists
-        if os.path.exists(inferencedata_file + '.csv'): 
-            gt_falls_idx                        = np.genfromtxt(inferencedata_file + '.csv', delimiter=',').astype(int)
-        # Maybe this file doesn't contain any falls
-        else: 
-            gt_falls_idx                        = []
+class compute_metric_early_predict:
+    def __init__(self, prediction_gap, lower_bound=5):
+        self.prediction_gap = prediction_gap
+        self.lower_bound = lower_bound
 
-        # Load the models
-        model                                   = autoencoder_mdl(model_dir = project_path + 'saved_model/')
-        
-        HVRAE_loss_history                       = model.HVRAE_predict(inferencedata)
-        plt.figure()
-        plt.ylim(0.0, 2.2)
-        plt.xlabel("Time in Seconds")
-        time_step = np.arange(0, len(centroidZ_history))*0.1 # 0.1 seconds per frame
-        plt.plot(time_step, centroidZ_history, linewidth=2, label='Centroid Height')
-        plt.plot(time_step, HVRAE_loss_history, linewidth=2, label='Anomaly Level')
-        plt.legend(loc="upper right")
-        plt.title('HVRAE Results')
-        plt.savefig(inferencedata_file+'_HVRAE_prediction.png')
-        plt.show()
-
-        HVRAE_SL_loss_history                    = model.HVRAE_SL_predict(inferencedata)
-        plt.figure()
-        plt.ylim(0.0, 2.2)
-        plt.xlabel("Time in Seconds")
-        time_step = np.arange(0, len(centroidZ_history))*0.1 # 0.1 seconds per frame
-        plt.plot(time_step, centroidZ_history, linewidth=2, label='Centroid Height')
-        plt.plot(time_step, HVRAE_SL_loss_history, linewidth=2, label='Anomaly Level')
-        plt.legend(loc="upper right")
-        plt.title('HVRAE_SL Results')
-        plt.savefig(inferencedata_file+'_HVRAE_SL_prediction.png')
-        plt.show()
-
-        RAE_loss_history                        = model.RAE_predict(inferencedata)
-        plt.figure()
-        plt.ylim(0.0, 2.2)
-        plt.xlabel("Time in Seconds")
-        time_step = np.arange(0, len(centroidZ_history))*0.1 # 0.1 seconds per frame
-        plt.plot(time_step, centroidZ_history, linewidth=2, label='Centroid Height')
-        plt.plot(time_step, RAE_loss_history, linewidth=2, label='Anomaly Level')
-        plt.legend(loc="upper right")
-        plt.title('RAE Results')
-        plt.savefig(inferencedata_file+'_RAE_prediction.png')
-        plt.show()
+    def detect_falls(self, loss_history, centroidZ_history, threshold, centroidZ_thr=0.6):
+        assert len(loss_history) == len(centroidZ_history), "ERROR: The length of loss history is different than the length of centroidZ history!"
+        seq_len                 = len(loss_history)
+        win_len                 = 10
+        centroidZ_dropthres     = centroidZ_thr
+        i                       = win_len - 1
+        detected_falls_idx      = []
+        while i < seq_len:
+            start_win = i - (win_len - 1)
+            end_win = i
+            if centroidZ_history[start_win] - centroidZ_history[end_win] >= centroidZ_dropthres:
+                detected_falls_idx.append(int(end_win))
+            i += 1
 
 
-        ### section 3 ###
-            # Load inference dataset and the ground truth timesheet
-        inferencedata_file                      = project_path + 'data/DS2/DS2'
-        inferencedata, centroidZ_history        = data_preproc().load_bin(inferencedata_file + '.npy', fortrain=False)
-        # Ground truth time index file exists
-        if os.path.exists(inferencedata_file + '.csv'): 
-            gt_falls_idx                        = np.genfromtxt(inferencedata_file + '.csv', delimiter=',').astype(int)
-        # Maybe this file doesn't contain any falls
-        else: 
-            gt_falls_idx                        = []
+        ones_idx                    = np.argwhere(np.array(loss_history) >= threshold).flatten()
+        fall_binseq                 = np.zeros(seq_len)
+        fall_binseq[ones_idx]       = 1
+        final_detected_falls_idx    = []
+        for det in detected_falls_idx:
+            detection_window_early_buffer = 5 # hardcoded value for checking the anommaly in the i previes patterns
+            detection_window_start = det - (win_len - 1) - detection_window_early_buffer
+            detection_window_end = det - (win_len - 1)
+            if 1 in fall_binseq[detection_window_start:detection_window_end + 1]:
+                final_detected_falls_idx.append(det)
 
-        # Load the models
-        model                                   = autoencoder_mdl(model_dir = project_path + 'saved_model/')
-        HVRAE_loss_history                       = model.HVRAE_predict(inferencedata)
-        HVRAE_SL_loss_history                    = model.HVRAE_SL_predict(inferencedata)
-        RAE_loss_history                        = model.RAE_predict(inferencedata)
-        
-        # For performace evaluation
-        calculator                              = compute_metric()
-        HVRAE_tpr, HVRAE_fp_total                 = calculator.cal_roc(HVRAE_loss_history, centroidZ_history, gt_falls_idx)
-        HVRAE_SL_tpr, HVRAE_SL_fp_total           = calculator.cal_roc(HVRAE_SL_loss_history, centroidZ_history, gt_falls_idx)
-        RAE_tpr, RAE_fp_total                   = calculator.cal_roc(RAE_loss_history, centroidZ_history, gt_falls_idx)
 
-        calculator                              = compute_metric_predict()
-        HVRAE_tpr_predict_anomaly, HVRAE_fp_total_predict_anomaly                 = calculator.cal_roc_anomaly(HVRAE_loss_history, centroidZ_history, gt_falls_idx)
-        HVRAE_tpr_predict_centroid, HVRAE_fp_total_predict_centroid                 = calculator.cal_roc_centroid(HVRAE_loss_history, centroidZ_history, gt_falls_idx)
-        # HVRAE_SL_tpr, HVRAE_SL_fp_total           = calculator.cal_roc_anomaly(HVRAE_SL_loss_history, centroidZ_history, gt_falls_idx)
-        # HVRAE_SL_tpr, HVRAE_SL_fp_total           = calculator.cal_roc_centroid(HVRAE_SL_loss_history, centroidZ_history, gt_falls_idx)
-        # RAE_tpr, RAE_fp_total                   = calculator.cal_roc_anomaly(RAE_loss_history, centroidZ_history, gt_falls_idx)
-        # RAE_tpr, RAE_fp_total                   = calculator.cal_roc_centroid(RAE_loss_history, centroidZ_history, gt_falls_idx)
-        print("================= anomaly ====================")
-        print(f"------- tpr predict: {HVRAE_tpr_predict_anomaly}")
-        print(f"------- fp predict: {HVRAE_fp_total_predict_anomaly}")
+        return final_detected_falls_idx, len(detected_falls_idx)
 
-        print("================= centroid ====================")
-        print(f"------- tpr predict: {HVRAE_tpr_predict_centroid}")
-        print(f"------- fp predict: {HVRAE_fp_total_predict_centroid}")
+    def find_tpfpfn(self, detected_falls_idx, gt_falls_idx):
+        cluster_win_len = 20
+        clustered_falls = []
+        i = 0
+        while i < len(detected_falls_idx):
+            j = i
+            while True:
+                if j == len(detected_falls_idx):
+                    break
+                if detected_falls_idx[j] - detected_falls_idx[i] > cluster_win_len:
+                    break
+                j += 1
+            cluster_indices = set(range(i, j))
+            representative = int((detected_falls_idx[i] + detected_falls_idx[j - 1]) / 2)
+            clustered_falls.append((representative, cluster_indices))
+            i = j
 
-        # Plot Receiver operating characteristic (ROC) curves
+        falls_fn = list(gt_falls_idx)
+        tp_cluster_indices = set()
+        falls_tp = []
+        for gt_idx in range(len(gt_falls_idx)):
+            gt_fall = gt_falls_idx[gt_idx]
+            window_start = int(gt_fall - self.lower_bound)
+            window_end = int(gt_fall - self.prediction_gap)
+            matched = False
+            for raw_idx, det in enumerate(detected_falls_idx):
+                if window_start <= det < window_end:
+                    for cluster_idx, (rep, indices) in enumerate(clustered_falls):
+                        if raw_idx in indices:
+                            tp_cluster_indices.add(cluster_idx)
+                            break
+                    matched = True
+                    break
+            if matched:
+                falls_fn.remove(gt_fall)
+                falls_tp.append(gt_idx)
+
+        falls_fp = [i for i in range(len(clustered_falls)) if i not in tp_cluster_indices]
+        return falls_tp, falls_fp, falls_fn
+
+    def cal_roc_anomaly(self, loss_history, centroidZ_history, gt_falls_idx):
+        n_gt_falls = len(gt_falls_idx)
+        print("How many falls?", n_gt_falls)
+        tpr, fpr = [], []
+        centroidZ_thr = 0.6
+        for threshold in np.arange(0.0, 10.0, 0.1):
+            detected_falls_idx, _ = self.detect_falls(loss_history, centroidZ_history, threshold, centroidZ_thr)
+            falls_tp, falls_fp, falls_fn = self.find_tpfpfn(detected_falls_idx, gt_falls_idx)
+            tpr.append(len(falls_tp) / n_gt_falls)
+            fpr.append(len(falls_fp))
+        return tpr, fpr
+
+    def cal_roc_centroid(self, loss_history, centroidZ_history, gt_falls_idx):
+        n_gt_falls = len(gt_falls_idx)
+        print("How many falls?", n_gt_falls)
+        tpr, fpr = [], []
+        anomaly_thr = 5
+        for centroid_thr in np.arange(0.0, 0.6, 0.1):
+            detected_falls_idx, _ = self.detect_falls(loss_history, centroidZ_history, anomaly_thr, centroid_thr)
+
+            falls_tp, falls_fp, falls_fn = self.find_tpfpfn(detected_falls_idx, gt_falls_idx)
+            tpr.append(len(falls_tp) / n_gt_falls)
+            fpr.append(len(falls_fp))
+        return tpr, fpr
+
+# ----------------------------------------------------------------------------
+
+# Cell 5
+if __name__ == '__main__':
+    project_path = '/Users/idoyanay/projects/personal_projects/mmfall/'
+
+    # # Generate the motion pattern from the original normal dataset. The proposed oversampling method is included.
+    # # Uncomment if you want to regenerate the data. It may take a long time.
+    # #####################################################################################################
+    # print("*********************************************************************")
+    # # Load the normal data file and preprocess the data
+    # print("INFO: Start preprocessing the normal training dataset...")
+    # train_data, test_data= data_preproc().load_bin(project_path + 'data/DS0/DS0.npy', fortrain=True)
+    # # Save the normal training and testing dataset
+    # np.save(project_path + 'data/normal_train_data', np.array(train_data))
+    # print("INFO: The train_data is saved in " + save_datapath + 'data/normal_train_data' + ".npy")
+    # np.save(project_path + 'data/normal_test_data', np.array(test_data))
+    # print("INFO: The test_data is saved in " + save_datapath + 'data/normal_test_data' + ".npy")
+    # #####################################################################################################
+
+# ----------------------------------------------------------------------------
+
+# Cell 6
+    # # Uncomment if you want to retrain the models. It may take a long time. And you may expect slightly changes in the results as training progress has lot of random things.
+    # # Or you can skip this section, go to next and load the saved models to check the results.
+    # # Train and save the model
+    # print("INFO: Load train/test data...")
+    # train_data      = np.load(project_path + 'data/normal_train_data.npy', allow_pickle=True)
+    # test_data       = np.load(project_path + 'data/normal_test_data.npy', allow_pickle=True)
+    # print("INFO: Start HVRAE/HVRAE_SL/RAE model training and testing...")
+    # model = autoencoder_mdl(model_dir = (project_path + 'saved_model/'))
+    # model.HVRAE_train(train_data, test_data)
+    # model.HVRAE_SL_train(train_data, test_data)
+    # model.RAE_train(train_data, test_data)
+
+    ## our edit
+    # path = r'C:/Users/idosy/uni_projects/mmfall/saved_model/HVRAE_mdl.h5'
+
+    # import os
+    # print(f"File size: {os.path.getsize(path)} bytes")
+
+    # with open(path, 'rb') as f:
+    #     header = f.read(50)
+    #     print(f"Header: {header}")
+
+# ----------------------------------------------------------------------------
+
+# Cell 7
+    # Load inference dataset and the ground truth timesheet
+    inferencedata_file_falls                      = project_path + 'data/DS1/DS1_4falls'
+    inferencedata_falls, centroidZ_history_falls        = data_preproc().load_bin(inferencedata_file_falls + '.npy', fortrain=False)
+
+    inferencedata_file_normal                      = project_path + 'data/DS1/DS1_4normal'
+    inferencedata_normal, centroidZ_history_normal        = data_preproc().load_bin(inferencedata_file_normal + '.npy', fortrain=False)
+
+    # ---- concatinate the falls and normal data for better initial testing ---- #
+    inferencedata_falls_normal = inferencedata_falls + inferencedata_normal
+    centroidZ_history_falls_normal = centroidZ_history_falls + centroidZ_history_normal
+
+    # --- calculate the gt_falls_idx (by knowing that there are only 4 falls)
+    centroidZ_history_np = np.array(centroidZ_history_falls)
+    n = len(centroidZ_history_np)
+    window_size = 100
+
+    # Find the index of the minimum value in each 100-sample window
+    window_mins = []
+    for start in range(0, n, window_size):
+        end = min(start + window_size, n)
+        window = centroidZ_history_np[start:end]
+        local_min_idx = np.argmin(window) + start  # offset by window start
+        window_mins.append((centroidZ_history_np[local_min_idx], local_min_idx))
+
+    # Sort by value and take the 4 smallest
+    window_mins.sort(key=lambda x: x[0])
+    gt_falls_idx = [idx for _, idx in window_mins[:4]]
+
+
+# ----------------------------------------------------------------------------
+
+# Cell 8
+
+    # Load the models
+    model                                   = autoencoder_mdl(model_dir = project_path + 'saved_model/')
+
+    HVRAE_loss_history_falls                       = model.HVRAE_predict(inferencedata_falls)
+    HVRAE_loss_history_normal                       = model.HVRAE_predict(inferencedata_normal)
+
+    HVRAE_SL_loss_history_falls                    = model.HVRAE_SL_predict(inferencedata_falls)
+    HVRAE_SL_loss_history_normal                    = model.HVRAE_SL_predict(inferencedata_normal)
+
+    RAE_loss_history_falls                        = model.RAE_predict(inferencedata_falls)
+    RAE_loss_history_normal                        = model.RAE_predict(inferencedata_normal)
+
+    HVRAE_loss_history_falls_normal = HVRAE_loss_history_falls + HVRAE_loss_history_normal
+    HVRAE_SL_loss_history_falls_normal = HVRAE_SL_loss_history_falls + HVRAE_SL_loss_history_normal
+    RAE_loss_history_falls_normal = RAE_loss_history_falls + RAE_loss_history_normal
+
+
+
+
+
+# ----------------------------------------------------------------------------
+
+# Cell 9
+    plt.figure()
+    plt.ylim(0.0, 2.2)
+    plt.xlabel("Time in Seconds")
+    time_step = np.arange(0, len(centroidZ_history_falls))*0.1 # 0.1 seconds per frame
+    plt.plot(time_step, centroidZ_history_falls, linewidth=2, label='Centroid Height')
+    plt.plot(time_step, HVRAE_loss_history_falls, linewidth=2, label='Anomaly Level')
+    plt.legend(loc="upper right")
+    plt.title('HVRAE Results')
+    plt.savefig(inferencedata_file_falls+'_HVRAE_prediction.png')
+    plt.show()
+
+
+
+# ----------------------------------------------------------------------------
+
+# Cell 10
+
+    plt.figure()
+    plt.ylim(0.0, 2.2)
+    plt.xlabel("Time in Seconds")
+    time_step = np.arange(0, len(centroidZ_history_falls) + len(centroidZ_history_normal))*0.1 # 0.1 seconds per frame
+    plt.plot(time_step, centroidZ_history_falls_normal, linewidth=2, label='Centroid Height')
+    plt.plot(time_step, HVRAE_loss_history_falls_normal, linewidth=2, label='Anomaly Level')
+    plt.legend(loc="upper right")
+    plt.title('HVRAE Results')
+    plt.savefig(inferencedata_file_falls+'_HVRAE_prediction.png')
+    plt.show()
+
+# ----------------------------------------------------------------------------
+
+# Cell 11
+
+    ## ---- plot the 80 to 100 frames, to try and see pattern of fall --- #
+    plt.figure()
+    plt.ylim(0.0, 2.2)
+    plt.xlabel("Time in Seconds")
+    time_step = np.arange(920, 940)*0.1 # 0.1 seconds per frame
+    plt.plot(time_step, centroidZ_history_falls[910:930], linewidth=2, label='Centroid Height')
+    plt.plot(time_step, HVRAE_loss_history_falls[910:930], linewidth=2, label='Anomaly Level')
+    plt.legend(loc="upper right")
+    plt.title('HVRAE Results')
+    # plt.savefig(inferencedata_file_falls+'_HVRAE_prediction.png')
+    plt.show()
+
+
+# ----------------------------------------------------------------------------
+
+# Cell 12
+    plt.figure()
+    plt.ylim(0.0, 2.2)
+    plt.xlabel("Time in Seconds")
+    time_step = np.arange(0, len(centroidZ_history_falls))*0.1 # 0.1 seconds per frame
+    plt.plot(time_step, centroidZ_history_falls, linewidth=2, label='Centroid Height')
+    plt.plot(time_step, HVRAE_SL_loss_history_falls, linewidth=2, label='Anomaly Level')
+    plt.legend(loc="upper right")
+    plt.title('HVRAE_SL Results')
+    plt.savefig(inferencedata_file_falls+'_HVRAE_SL_prediction.png')
+    plt.show()
+
+
+# ----------------------------------------------------------------------------
+
+# Cell 13
+    plt.figure()
+    plt.ylim(0.0, 2.2)
+    plt.xlabel("Time in Seconds")
+    time_step = np.arange(0, len(centroidZ_history_falls))*0.1 # 0.1 seconds per frame
+    plt.plot(time_step, centroidZ_history_falls, linewidth=2, label='Centroid Height')
+    plt.plot(time_step, RAE_loss_history_falls, linewidth=2, label='Anomaly Level')
+    plt.legend(loc="upper right")
+    plt.title('RAE Results')
+    plt.savefig(inferencedata_file_falls+'_RAE_prediction.png')
+    plt.show()
+
+# ----------------------------------------------------------------------------
+
+# Cell 14
+    # Early prediction evaluation on DS1 (sanity check)
+    print(f"gt_falls_idx: {gt_falls_idx}")
+    for gap in [1, 2, 3]:
+        calculator = compute_metric_early_predict(prediction_gap=gap)
+        HVRAE_ep_tpr, HVRAE_ep_fpr = calculator.cal_roc_anomaly(HVRAE_loss_history_falls_normal, centroidZ_history_falls_normal, gt_falls_idx)
+        HVRAE_SL_ep_tpr, HVRAE_SL_ep_fpr = calculator.cal_roc_anomaly(HVRAE_SL_loss_history_falls_normal, centroidZ_history_falls_normal, gt_falls_idx)
+        RAE_ep_tpr, RAE_ep_fpr = calculator.cal_roc_anomaly(RAE_loss_history_falls_normal, centroidZ_history_falls_normal, gt_falls_idx)
+
         plt.figure()
         plt.xlim(-0.1, 10)
         plt.xticks(np.arange(0, 11, 1))
         plt.ylim(0.0, 1.1)
-        plt.scatter(HVRAE_fp_total, HVRAE_tpr, c='r')
-        plt.plot(HVRAE_fp_total, HVRAE_tpr, c='r', linewidth=2, label='HVRAE ROC')
-        plt.xlim(-0.1, 10)
-        plt.xticks(np.arange(0, 11, 1))
-        plt.ylim(0.0, 1.1)
-        plt.scatter(HVRAE_SL_fp_total, HVRAE_SL_tpr, c='b')
-        plt.plot(HVRAE_SL_fp_total, HVRAE_SL_tpr, c='b', linewidth=2, label='HVRAE_SL ROC')
-        plt.xlim(-0.1, 10)
-        plt.xticks(np.arange(0, 11, 1))
-        plt.ylim(0.0, 1.1)
-        plt.scatter(RAE_fp_total, RAE_tpr, c='g')
-        plt.plot(RAE_fp_total, RAE_tpr, c='g', linewidth=2, label='RAE ROC')
-        plt.legend(loc="lower right")
-        plt.xlabel("Number od False Alarms")
-        plt.ylabel("True Fall Detection Rate")
-        plt.savefig(inferencedata_file + '_ROC.png')
+        plt.scatter(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r')
+        plt.plot(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r', linewidth=2, label='HVRAE')
+        plt.scatter(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b')
+        plt.plot(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b', linewidth=2, label='HVRAE_SL')
+        plt.scatter(RAE_ep_fpr, RAE_ep_tpr, c='g')
+        plt.plot(RAE_ep_fpr, RAE_ep_tpr, c='g', linewidth=2, label='RAE')
+        plt.title(f'DS1 Early Predict ROC (anomaly sweep, gap={gap} frames)')
+        plt.xlabel('Number of False Alarms')
+        plt.ylabel('True Fall Detection Rate')
+        plt.legend(loc='lower right')
         plt.show()
+
+# ----------------------------------------------------------------------------
+
+# Cell 15
+
+    plt.figure()
+    plt.ylim(0.0, 2.2)
+    plt.xlabel("Time in Seconds")
+    time_step = np.arange(0, len(centroidZ_history_normal))*0.1 # 0.1 seconds per frame
+    plt.plot(time_step, centroidZ_history_normal, linewidth=2, label='Centroid Height')
+    plt.plot(time_step, HVRAE_loss_history_normal, linewidth=2, label='Anomaly Level')
+    plt.legend(loc="upper right")
+    plt.title('HVRAE Results')
+    plt.savefig(inferencedata_file_normal+'_HVRAE_prediction.png')
+    plt.show()
+
+    plt.figure()
+    plt.ylim(0.0, 2.2)
+    plt.xlabel("Time in Seconds")
+    time_step = np.arange(0, len(centroidZ_history_normal))*0.1 # 0.1 seconds per frame
+    plt.plot(time_step, centroidZ_history_normal, linewidth=2, label='Centroid Height')
+    plt.plot(time_step, HVRAE_SL_loss_history_normal, linewidth=2, label='Anomaly Level')
+    plt.legend(loc="upper right")
+    plt.title('HVRAE_SL Results')
+    plt.savefig(inferencedata_file_normal+'_HVRAE_SL_prediction.png')
+    plt.show()
+
+    plt.figure()
+    plt.ylim(0.0, 2.2)
+    plt.xlabel("Time in Seconds")
+    time_step = np.arange(0, len(centroidZ_history_normal))*0.1 # 0.1 seconds per frame
+    plt.plot(time_step, centroidZ_history_normal, linewidth=2, label='Centroid Height')
+    plt.plot(time_step, RAE_loss_history_normal, linewidth=2, label='Anomaly Level')
+    plt.legend(loc="upper right")
+    plt.title('RAE Results')
+    plt.savefig(inferencedata_file_normal+'_RAE_prediction.png')
+    plt.show()
+
+# ----------------------------------------------------------------------------
+
+# Cell 16
+    # Load inference dataset and the ground truth timesheet
+    inferencedata_file                      = project_path + 'data/DS2/DS2'
+    inferencedata, centroidZ_history        = data_preproc().load_bin(inferencedata_file + '.npy', fortrain=False)
+    # Ground truth time index file exists
+    if os.path.exists(inferencedata_file + '.csv'):
+        gt_falls_idx                        = np.genfromtxt(inferencedata_file + '.csv', delimiter=',').astype(int)
+    # Maybe this file doesn't contain any falls
+    else:
+        gt_falls_idx                        = []
+
+    # Load the models
+    model                                   = autoencoder_mdl(model_dir = project_path + 'saved_model/')
+    HVRAE_loss_history                       = model.HVRAE_predict(inferencedata)
+    HVRAE_SL_loss_history                    = model.HVRAE_SL_predict(inferencedata)
+    RAE_loss_history                        = model.RAE_predict(inferencedata)
+
+    # For performace evaluation
+    calculator                              = compute_metric()
+    HVRAE_tpr, HVRAE_fp_total                 = calculator.cal_roc(HVRAE_loss_history, centroidZ_history, gt_falls_idx)
+    HVRAE_SL_tpr, HVRAE_SL_fp_total           = calculator.cal_roc(HVRAE_SL_loss_history, centroidZ_history, gt_falls_idx)
+    RAE_tpr, RAE_fp_total                   = calculator.cal_roc(RAE_loss_history, centroidZ_history, gt_falls_idx)
+
+    # calculator                              = compute_metric_predict()
+    # HVRAE_tpr_predict_anomaly, HVRAE_fp_total_predict_anomaly                 = calculator.cal_roc_anomaly(HVRAE_loss_history, centroidZ_history, gt_falls_idx)
+    # HVRAE_tpr_predict_centroid, HVRAE_fp_total_predict_centroid                 = calculator.cal_roc_centroid(HVRAE_loss_history, centroidZ_history, gt_falls_idx)
+    # # HVRAE_SL_tpr, HVRAE_SL_fp_total           = calculator.cal_roc_anomaly(HVRAE_SL_loss_history, centroidZ_history, gt_falls_idx)
+    # # HVRAE_SL_tpr, HVRAE_SL_fp_total           = calculator.cal_roc_centroid(HVRAE_SL_loss_history, centroidZ_history, gt_falls_idx)
+    # # RAE_tpr, RAE_fp_total                   = calculator.cal_roc_anomaly(RAE_loss_history, centroidZ_history, gt_falls_idx)
+    # # RAE_tpr, RAE_fp_total                   = calculator.cal_roc_centroid(RAE_loss_history, centroidZ_history, gt_falls_idx)
+    # print("================= anomaly ====================")
+    # print(f"------- tpr predict: {HVRAE_tpr_predict_anomaly}")
+    # print(f"------- fp predict: {HVRAE_fp_total_predict_anomaly}")
+
+    # print("================= centroid ====================")
+    # print(f"------- tpr predict: {HVRAE_tpr_predict_centroid}")
+    # print(f"------- fp predict: {HVRAE_fp_total_predict_centroid}")
+
+    # Plot Receiver operating characteristic (ROC) curves
+    plt.figure()
+    plt.xlim(-0.1, 10)
+    plt.xticks(np.arange(0, 11, 1))
+    plt.ylim(0.0, 1.1)
+    plt.scatter(HVRAE_fp_total, HVRAE_tpr, c='r')
+    plt.plot(HVRAE_fp_total, HVRAE_tpr, c='r', linewidth=2, label='HVRAE ROC')
+    plt.xlim(-0.1, 10)
+    plt.xticks(np.arange(0, 11, 1))
+    plt.ylim(0.0, 1.1)
+    plt.scatter(HVRAE_SL_fp_total, HVRAE_SL_tpr, c='b')
+    plt.plot(HVRAE_SL_fp_total, HVRAE_SL_tpr, c='b', linewidth=2, label='HVRAE_SL ROC')
+    plt.xlim(-0.1, 10)
+    plt.xticks(np.arange(0, 11, 1))
+    plt.ylim(0.0, 1.1)
+    plt.scatter(RAE_fp_total, RAE_tpr, c='g')
+    plt.plot(RAE_fp_total, RAE_tpr, c='g', linewidth=2, label='RAE ROC')
+    plt.legend(loc="lower right")
+    plt.xlabel("Number od False Alarms")
+    plt.ylabel("True Fall Detection Rate")
+    plt.savefig(inferencedata_file + '_ROC.png')
+    plt.show()
+
+    # plt.figure()
+    # plt.xlim(-0.1,10)
+    # plt.xticks(np.arange(0,11,1))
+    # plt.ylim(0.0,1.1)
+    # plt.scatter(HVRAE_fp_total_predict_anomaly, HVRAE_tpr_predict_anomaly, c='r')
+    # plt.plot(HVRAE_fp_total_predict_anomaly, HVRAE_tpr_predict_anomaly, c='r', linewidth=2, label='HVRAE ROC (predict anomly)')
+    # plt.xlim(-0.1,10)
+    # plt.xticks(np.arange(0,11,1))
+    # plt.ylim(0.0,1.1)
+    # plt.scatter(HVRAE_fp_total_predict_centroid, HVRAE_tpr_predict_centroid, c='r')
+    # plt.plot(HVRAE_fp_total_predict_centroid, HVRAE_tpr_predict_centroid, c='r', linewidth=2, label='HVRAE ROC (predict centroid)')
+
+
+
+# ----------------------------------------------------------------------------
+
+# Cell 17
+    # Early prediction evaluation on DS2
+    for gap in [1, 2, 3]:
+        calculator = compute_metric_early_predict(prediction_gap=gap)
+        HVRAE_ep_tpr, HVRAE_ep_fpr = calculator.cal_roc_anomaly(HVRAE_loss_history, centroidZ_history, gt_falls_idx)
+        HVRAE_SL_ep_tpr, HVRAE_SL_ep_fpr = calculator.cal_roc_anomaly(HVRAE_SL_loss_history, centroidZ_history, gt_falls_idx)
+        RAE_ep_tpr, RAE_ep_fpr = calculator.cal_roc_anomaly(RAE_loss_history, centroidZ_history, gt_falls_idx)
 
         plt.figure()
-        plt.xlim(-0.1,10)
-        plt.xticks(np.arange(0,11,1))
-        plt.ylim(0.0,1.1)
-        plt.scatter(HVRAE_fp_total_predict_anomaly, HVRAE_tpr_predict_anomaly, c='r')
-        plt.plot(HVRAE_fp_total_predict_anomaly, HVRAE_tpr_predict_anomaly, c='r', linewidth=2, label='HVRAE ROC (predict anomly)')
-        plt.xlim(-0.1,10)
-        plt.xticks(np.arange(0,11,1))
-        plt.ylim(0.0,1.1)
-        plt.scatter(HVRAE_fp_total_predict_centroid, HVRAE_tpr_predict_centroid, c='r')
-        plt.plot(HVRAE_fp_total_predict_centroid, HVRAE_tpr_predict_centroid, c='r', linewidth=2, lable='HVRAE ROC (predict centroid)')
-
-
-        # plt.xlim(-0.1, 10)
-        # plt.xticks(np.arange(0, 11, 1))
-        # plt.ylim(0.0, 1.1)
-        # plt.scatter(HVRAE_SL_fp_total, HVRAE_SL_tpr, c='b')
-        # plt.plot(HVRAE_SL_fp_total, HVRAE_SL_tpr, c='b', linewidth=2, label='HVRAE_SL ROC')
-        # plt.xlim(-0.1, 10)
-        # plt.xticks(np.arange(0, 11, 1))
-        # plt.ylim(0.0, 1.1)
-        # plt.scatter(RAE_fp_total, RAE_tpr, c='g')
-        # plt.plot(RAE_fp_total, RAE_tpr, c='g', linewidth=2, label='RAE ROC')
-        plt.legend(loc="lower right")
-        plt.xlabel("Number od False Alarms")
-        plt.ylabel("True Fall Detection Rate")
-        plt.savefig(inferencedata_file + '_ROC.png')
+        plt.xlim(-0.1, 10)
+        plt.xticks(np.arange(0, 11, 1))
+        plt.ylim(0.0, 1.1)
+        plt.scatter(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r')
+        plt.plot(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r', linewidth=2, label='HVRAE')
+        plt.scatter(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b')
+        plt.plot(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b', linewidth=2, label='HVRAE_SL')
+        plt.scatter(RAE_ep_fpr, RAE_ep_tpr, c='g')
+        plt.plot(RAE_ep_fpr, RAE_ep_tpr, c='g', linewidth=2, label='RAE')
+        plt.title(f'DS2 Early Predict ROC (anomaly sweep, gap={gap} frames)')
+        plt.xlabel('Number of False Alarms')
+        plt.ylabel('True Fall Detection Rate')
+        plt.legend(loc='lower right')
         plt.show()
+
+# ----------------------------------------------------------------------------
+
+# Cell 18
