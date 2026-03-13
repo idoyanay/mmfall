@@ -905,7 +905,7 @@ class compute_metric_early_predict:
         final_detected_falls_idx    = []
         for det in detected_falls_idx:
             detection_window_early_buffer = 5 # hardcoded value for checking the anommaly in the i previes patterns
-            detection_window_start = det - (win_len - 1) - detection_window_early_buffer
+            detection_window_start = max(0, det - (win_len - 1) - detection_window_early_buffer)
             detection_window_end = det - (win_len - 1)
             if 1 in fall_binseq[detection_window_start:detection_window_end + 1]:
                 final_detected_falls_idx.append(det)
@@ -915,6 +915,7 @@ class compute_metric_early_predict:
 
     def find_tpfpfn(self, detected_falls_idx, gt_falls_idx):
         cluster_win_len = 20
+        # Step 1: Cluster raw detections (store actual detection values per cluster)
         clustered_falls = []
         i = 0
         while i < len(detected_falls_idx):
@@ -925,32 +926,44 @@ class compute_metric_early_predict:
                 if detected_falls_idx[j] - detected_falls_idx[i] > cluster_win_len:
                     break
                 j += 1
-            cluster_indices = set(range(i, j))
-            representative = int((detected_falls_idx[i] + detected_falls_idx[j - 1]) / 2)
-            clustered_falls.append((representative, cluster_indices))
+            clustered_falls.append(detected_falls_idx[i:j])
             i = j
 
-        falls_fn = list(gt_falls_idx)
+        # Step 2: Iterate clusters — match each to the first unmatched GT whose window it falls in
+        matched_gt_indices = set()
         tp_cluster_indices = set()
-        falls_tp = []
-        for gt_idx in range(len(gt_falls_idx)):
-            gt_fall = gt_falls_idx[gt_idx]
+        for cluster_idx, cluster_dets in enumerate(clustered_falls):
+            for gt_idx, gt_fall in enumerate(gt_falls_idx):
+                if gt_idx in matched_gt_indices:
+                    continue
+                window_start = int(gt_fall - self.lower_bound)
+                window_end = int(gt_fall - self.prediction_gap)
+                if any(window_start <= det < window_end for det in cluster_dets):
+                    tp_cluster_indices.add(cluster_idx)
+                    matched_gt_indices.add(gt_idx)
+                    break
+
+        # Step 3: FP = clusters with no GT match
+        falls_fp = [i for i in range(len(clustered_falls)) if i not in tp_cluster_indices]
+
+        # Step 4: FN = GT falls with no detection at all in their window; count ignored for assertion
+        falls_tp = list(matched_gt_indices)
+        falls_fn = []
+        n_ignored = 0
+        for gt_idx, gt_fall in enumerate(gt_falls_idx):
+            if gt_idx in matched_gt_indices:
+                continue
             window_start = int(gt_fall - self.lower_bound)
             window_end = int(gt_fall - self.prediction_gap)
-            matched = False
-            for raw_idx, det in enumerate(detected_falls_idx):
-                if window_start <= det < window_end:
-                    for cluster_idx, (rep, indices) in enumerate(clustered_falls):
-                        if raw_idx in indices:
-                            tp_cluster_indices.add(cluster_idx)
-                            break
-                    matched = True
-                    break
-            if matched:
-                falls_fn.remove(gt_fall)
-                falls_tp.append(gt_idx)
+            if any(window_start <= det < window_end for det in detected_falls_idx):
+                n_ignored += 1  # detection exists but cluster consumed by another GT
+            else:
+                falls_fn.append(gt_fall)
 
-        falls_fp = [i for i in range(len(clustered_falls)) if i not in tp_cluster_indices]
+        # Sanity checks: every GT and every cluster must be fully accounted for
+        assert len(falls_tp) + len(falls_fn) + n_ignored == len(gt_falls_idx),             f"GT accounting mismatch: {len(falls_tp)} TP + {len(falls_fn)} FN + {n_ignored} ignored \!= {len(gt_falls_idx)} total"
+        assert len(tp_cluster_indices) + len(falls_fp) == len(clustered_falls),             f"Cluster accounting mismatch: {len(tp_cluster_indices)} TP + {len(falls_fp)} FP \!= {len(clustered_falls)} total clusters"
+
         return falls_tp, falls_fp, falls_fn
 
     def cal_roc_anomaly(self, loss_history, centroidZ_history, gt_falls_idx):
@@ -1167,20 +1180,22 @@ if __name__ == '__main__':
         HVRAE_SL_ep_tpr, HVRAE_SL_ep_fpr = calculator.cal_roc_anomaly(HVRAE_SL_loss_history_falls_normal, centroidZ_history_falls_normal, gt_falls_idx)
         RAE_ep_tpr, RAE_ep_fpr = calculator.cal_roc_anomaly(RAE_loss_history_falls_normal, centroidZ_history_falls_normal, gt_falls_idx)
 
-        plt.figure()
-        plt.xlim(-0.1, 10)
-        plt.xticks(np.arange(0, 11, 1))
-        plt.ylim(0.0, 1.1)
-        plt.scatter(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r')
-        plt.plot(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r', linewidth=2, label='HVRAE')
-        plt.scatter(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b')
-        plt.plot(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b', linewidth=2, label='HVRAE_SL')
-        plt.scatter(RAE_ep_fpr, RAE_ep_tpr, c='g')
-        plt.plot(RAE_ep_fpr, RAE_ep_tpr, c='g', linewidth=2, label='RAE')
-        plt.title(f'DS1 Early Predict ROC (anomaly sweep, gap={gap} frames)')
-        plt.xlabel('Number of False Alarms')
-        plt.ylabel('True Fall Detection Rate')
-        plt.legend(loc='lower right')
+        n = min(len(HVRAE_ep_fpr), len(HVRAE_SL_ep_fpr), len(RAE_ep_fpr))
+        x = np.arange(n)
+        width = 0.25
+
+        fig, ax = plt.subplots()
+        ax.bar(x - width, HVRAE_ep_tpr[:n], width, color='r', label='HVRAE')
+        ax.bar(x,         HVRAE_SL_ep_tpr[:n], width, color='b', label='HVRAE_SL')
+        ax.bar(x + width, RAE_ep_tpr[:n],   width, color='g', label='RAE')
+        ax.set_xticks(x)
+        ax.set_xticklabels([f'{v:.1f}' for v in HVRAE_ep_fpr[:n]], rotation=45)
+        ax.set_ylim(0.0, 1.1)
+        ax.set_title(f'DS1 Early Predict ROC (anomaly sweep, gap={gap} frames)')
+        ax.set_xlabel('Number of False Alarms')
+        ax.set_ylabel('True Fall Detection Rate')
+        ax.legend(loc='lower right')
+        plt.tight_layout()
         plt.show()
 
 # ----------------------------------------------------------------------------
