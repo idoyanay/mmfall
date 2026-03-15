@@ -398,18 +398,23 @@ class autoencoder_mdl:
             return HVRAE_loss
 
         print("INFO: Start to predict...")
-        prediction_history  = []
-        loss_history        = []
-        for pattern in inferencedata:
-            pattern             = np.expand_dims(pattern, axis=0)
-            current_prediction  = model.predict(pattern, batch_size=1)
-            predicted_z_mean    = get_z_mean_model.predict(pattern, batch_size=1)
-            predicted_z_log_var = get_z_log_var_model.predict(pattern, batch_size=1)
-            # Call the HVRAE_loss function
-            # The HVRAE_loss function input is:
-            # Model input motion pattern, model output mean and logvar of p(X|z), mean of q(z|X), logvar of q(z|X)
-            current_loss        = HVRAE_loss(pattern, current_prediction, predicted_z_mean, predicted_z_log_var)
-            loss_history.append(current_loss)
+        all_predictions     = model.predict(inferencedata, batch_size=64, verbose=0)
+        all_z_mean          = get_z_mean_model.predict(inferencedata, batch_size=64, verbose=0)
+        all_z_log_var       = get_z_log_var_model.predict(inferencedata, batch_size=64, verbose=0)
+
+        n_features          = inferencedata.shape[-1]
+        mean_pred           = all_predictions[:, :, :, :n_features]
+        logvar_pred         = all_predictions[:, :, :, n_features:]
+        var_pred            = np.exp(logvar_pred)
+
+        y_reshape           = inferencedata.reshape(inferencedata.shape[0], inferencedata.shape[1], -1)
+        mean_reshape        = mean_pred.reshape(mean_pred.shape[0], mean_pred.shape[1], -1)
+        var_reshape         = var_pred.reshape(var_pred.shape[0], var_pred.shape[1], -1)
+
+        log_pXz             = np.sum(0.5 * np.square(y_reshape - mean_reshape) / var_reshape, axis=-1)
+        kl_loss             = -0.5 * np.sum(1 + all_z_log_var - np.square(all_z_mean) - np.exp(all_z_log_var), axis=-1)
+        loss_per_pattern    = np.mean(log_pXz + kl_loss, axis=-1)
+        loss_history        = loss_per_pattern.tolist()
         print("INFO: Prediction is done!")
 
         return loss_history
@@ -586,18 +591,17 @@ class autoencoder_mdl:
             return HVRAE_loss
 
         print("INFO: Start to predict...")
-        prediction_history  = []
-        loss_history        = []
-        for pattern in inferencedata:
-            pattern             = np.expand_dims(pattern, axis=0)
-            current_prediction  = model.predict(pattern, batch_size=1)
-            predicted_z_mean    = get_z_mean_model.predict(pattern, batch_size=1)
-            predicted_z_log_var = get_z_log_var_model.predict(pattern, batch_size=1)
-            # Call the HVRAE_loss function
-            # The HVRAE_loss function input is:
-            # Model input motion pattern, model output mean and logvar of p(X|z), mean of q(z|X), logvar of q(z|X)
-            current_loss        = HVRAE_loss(pattern, current_prediction, predicted_z_mean, predicted_z_log_var)
-            loss_history.append(current_loss)
+        all_predictions     = model.predict(inferencedata, batch_size=64, verbose=0)
+        all_z_mean          = get_z_mean_model.predict(inferencedata, batch_size=64, verbose=0)
+        all_z_log_var       = get_z_log_var_model.predict(inferencedata, batch_size=64, verbose=0)
+
+        y_reshape           = inferencedata.reshape(inferencedata.shape[0], inferencedata.shape[1], -1)
+        mean_reshape        = all_predictions.reshape(all_predictions.shape[0], all_predictions.shape[1], -1)
+
+        log_pXz             = np.mean(np.square(y_reshape - mean_reshape), axis=-1)
+        kl_loss             = -0.5 * np.sum(1 + all_z_log_var - np.square(all_z_mean) - np.exp(all_z_log_var), axis=-1)
+        loss_per_pattern    = np.mean(log_pXz + kl_loss, axis=-1)
+        loss_history        = loss_per_pattern.tolist()
         print("INFO: Prediction is done!")
 
         return loss_history
@@ -673,12 +677,10 @@ class autoencoder_mdl:
 
         # plot_model(model, show_shapes =True, to_file=self.model_dir+'RAE_model.png')
         print("INFO: Start to predict...")
-        prediction_history  = []
-        loss_history        = []
-        for pattern in inferencedata:
-            pattern             = np.expand_dims(pattern, axis=0)
-            current_loss        = model.test_on_batch(pattern, pattern)
-            loss_history.append(current_loss)
+        all_predictions     = model.predict(inferencedata, batch_size=64, verbose=0)
+        mse_per_point       = np.mean(np.square(inferencedata - all_predictions), axis=-1)
+        mse_per_pattern     = np.mean(mse_per_point, axis=(1, 2))
+        loss_history        = mse_per_pattern.tolist()
         print("INFO: Prediction is done!")
 
         return loss_history
@@ -1215,41 +1217,32 @@ if __name__ == '__main__':
 
 # Cell 17
     # Early prediction evaluation on DS2
-    for gap in [1, 2, 3]:
+    for gap in [1]:
         calculator = compute_metric_early_predict(prediction_gap=gap)
         HVRAE_ep_tpr, HVRAE_ep_fpr = calculator.cal_roc_anomaly(HVRAE_loss_history, centroidZ_history, gt_falls_idx)
         HVRAE_SL_ep_tpr, HVRAE_SL_ep_fpr = calculator.cal_roc_anomaly(HVRAE_SL_loss_history, centroidZ_history, gt_falls_idx)
         RAE_ep_tpr, RAE_ep_fpr = calculator.cal_roc_anomaly(RAE_loss_history, centroidZ_history, gt_falls_idx)
-
-        # plt.figure()
-        # plt.xlim(-0.1, 10)
-        # plt.xticks(np.arange(0, 11, 1))
-        # plt.ylim(0.0, 1.1)
-        # plt.scatter(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r')
-        # plt.plot(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r', linewidth=2, label='HVRAE')
-        # plt.scatter(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b')
-        # plt.plot(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b', linewidth=2, label='HVRAE_SL')
-        # plt.scatter(RAE_ep_fpr, RAE_ep_tpr, c='g')
-        # plt.plot(RAE_ep_fpr, RAE_ep_tpr, c='g', linewidth=2, label='RAE')
-        # plt.title(f'DS2 Early Predict ROC (anomaly sweep, gap={gap} frames)')
-        # plt.xlabel('Number of False Alarms')
-        # plt.ylabel('True Fall Detection Rate')
-        # plt.legend(loc='lower right')
-        # plt.show()
         plt.figure()
         plt.xlim(-0.1, 10)
         plt.xticks(np.arange(0, 11, 1))
         plt.ylim(0.0, 1.1)
         plt.scatter(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r')
-        plt.plot(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r', linewidth=2, label='HVRAE')
+        plt.plot(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r', linewidth=2, label='HVRAE ROC')
+        plt.xlim(-0.1, 10)
+        plt.xticks(np.arange(0, 11, 1))
+        plt.ylim(0.0, 1.1)
         plt.scatter(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b')
-        plt.plot(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b', linewidth=2, label='HVRAE_SL')
+        plt.plot(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b', linewidth=2, label='HVRAE_SL ROC')
+        plt.xlim(-0.1, 10)
+        plt.xticks(np.arange(0, 11, 1))
+        plt.ylim(0.0, 1.1)
         plt.scatter(RAE_ep_fpr, RAE_ep_tpr, c='g')
-        plt.plot(RAE_ep_fpr, RAE_ep_tpr, c='g', linewidth=2, label='RAE')
-        plt.title(f'DS1 Early Predict ROC (anomaly sweep, gap={gap} frames)')
-        plt.xlabel('Number of False Alarms')
-        plt.ylabel('True Fall Detection Rate')
-        plt.legend(loc='lower right')
+        plt.plot(RAE_ep_fpr, RAE_ep_tpr, c='g', linewidth=2, label='RAE ROC')
+        plt.legend(loc="lower right")
+        plt.xlabel("Number od False Alarms")
+        plt.ylabel("True Fall Detection Rate")
+        plt.savefig(inferencedata_file + '_ROC.png')
+        plt.show()
 
 # ----------------------------------------------------------------------------
 
