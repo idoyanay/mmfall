@@ -92,3 +92,6 @@ Multiple recording sessions can be merged with `combine.py` (adjusts ground trut
 
 ## General Notes and Instructions
 
+### Notebook Editing — MANDATORY
+When reading, editing, or making ANY changes to `.ipynb` files, you MUST use the `read_and_update_ipynb` skill. Do NOT use the built-in `NotebookEdit` tool or read `.ipynb` JSON directly. Always invoke the skill first. This applies to `src/mmfall.ipynb` and any other notebook in the project.
+
