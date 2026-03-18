@@ -42,11 +42,31 @@ The key fix vs. the previous version: FP previously used a narrow time window an
 
 ---
 
+## Weighted anomaly detection (`method='velocity'` only)
+
+When `weighted=True`, the effective anomaly threshold is reduced proportionally to how far the estimated centroidZ has dropped from the person's standing height at the start of the detection window:
+
+```
+Z_ref = centroidZ_history[start_win]
+estimated_Z = centroidZ_history[j] + centroidVz_history[j] * prediction_gap * frame_duration
+ratio = max(0, (Z_ref - estimated_Z) / Z_ref)
+weight = 1 + scale * ratio^power
+effective_threshold = threshold / weight
+```
+
+- `Z_ref` is per-window (not a global constant) -- it's the height before each potential fall began
+- `scale` (default 1.0): controls maximum extra weight; when estimated_Z = 0, weight = 1 + scale
+- `power` (default 1.0): 1 = linear, 2 = quadratic relationship between drop ratio and weight
+- When `weighted=False` (default) or `method='drop'`, the original binary anomaly check is used -- all existing callers are unaffected
+
+---
+
 ## ROC evaluation
 
 - `cal_roc_anomaly` sweeps anomaly threshold (fixed `centroidZ_thr=0.6`)
 - `cal_roc_centroid` sweeps centroidZ threshold (fixed `anomaly_thr=5`)
 - Both accept `gt_predict_frames` for proper FP filtering
+- Both forward `weighted`, `weight_scale`, `weight_power` to `detect_falls`
 - Plots: TPR-vs-FP ROC, TP-vs-FP count, TPR-vs-threshold, FP-vs-threshold
 
 ---
@@ -56,3 +76,5 @@ The key fix vs. the previous version: FP previously used a narrow time window an
 - Per-GT-fall centroidZ + causally-aligned anomaly overlay plots
 - HVRAE-vs-HVRAE_SL missed/caught fall analysis
 - FP cluster analysis for each model independently
+- Weighted velocity ROC: compares drop, unweighted radar, and weighted radar with various (power, scale) configs
+- Weighted centroid sweep: centroid threshold sweep comparing unweighted vs weighted radar

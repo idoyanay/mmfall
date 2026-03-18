@@ -791,7 +791,6 @@ class compute_metric:
 
     def cal_roc(self, loss_history, centroidZ_history, gt_falls_idx):
         n_gt_falls = len(gt_falls_idx)
-        print("How many falls?", n_gt_falls)
         tpr, fpr = [], []
         for threshold in np.arange(0.0, 10.0, 0.1):
             detected_falls_idx, _           = self.detect_falls(loss_history, centroidZ_history, threshold)
@@ -814,7 +813,7 @@ class compute_metric_early_predict:
         self.prediction_gap = prediction_gap
         self.lower_bound = lower_bound
 
-    def detect_falls(self, loss_history, centroidZ_history, threshold, centroidZ_thr=0.6, method='drop', centroidVz_history=None, frame_duration=0.1):
+    def detect_falls(self, loss_history, centroidZ_history, threshold, centroidZ_thr=0.6, method='drop', centroidVz_history=None, frame_duration=0.1, weighted=False, weight_scale=1.0, weight_power=1.0):
         assert len(loss_history) == len(centroidZ_history), "ERROR: The length of loss history is different than the length of centroidZ history!"
         seq_len                 = len(loss_history)
         win_len                 = 10
@@ -831,22 +830,48 @@ class compute_metric_early_predict:
                 assert centroidVz_history is not None, "centroidVz_history required for method='velocity'"
                 estimated_Z = centroidZ_history[end_win] + centroidVz_history[end_win] * self.prediction_gap * frame_duration
                 if centroidZ_history[start_win] - estimated_Z >= centroidZ_dropthres:
-                    detected_falls_idx.append(int(end_win))
+                    detected_falls_idx.append((int(end_win), int(start_win)))
             i += 1
 
 
-        ones_idx                    = np.argwhere(np.array(loss_history) >= threshold).flatten()
-        fall_binseq                 = np.zeros(seq_len)
-        fall_binseq[ones_idx]       = 1
+        # Anomaly filtering: check if anomaly score exceeds threshold in detection window
         final_detected_falls_idx    = []
-        for det in detected_falls_idx:
+        for det_item in detected_falls_idx:
+            # Unpack: velocity method stores (end_win, start_win) tuples, drop stores ints
+            if isinstance(det_item, tuple):
+                det, det_start_win = det_item
+            else:
+                det, det_start_win = det_item, None
+
             detection_window_early_buffer = self.lower_bound
             detection_window_start = max(0, det - (win_len - 1) - detection_window_early_buffer)
             detection_window_end = det - (win_len - 1)
-            if 1 in fall_binseq[detection_window_start:detection_window_end + 1]:
-                final_detected_falls_idx.append(det)
 
+            if weighted and method == 'velocity' and det_start_win is not None:
+                # Weighted anomaly check: lower effective threshold for larger drops
+                Z_ref = centroidZ_history[det_start_win]
+                passed = False
+                for j in range(detection_window_start, detection_window_end + 1):
+                    if Z_ref > 0:
+                        estimated_Z_j = centroidZ_history[j] + centroidVz_history[j] * self.prediction_gap * frame_duration
+                        ratio = max(0, (Z_ref - estimated_Z_j) / Z_ref)
+                        weight = 1 + weight_scale * (ratio ** weight_power)
+                        effective_threshold = threshold / weight
+                    else:
+                        effective_threshold = threshold
+                    if loss_history[j] >= effective_threshold:
+                        passed = True
+                        break
+                if passed:
+                    final_detected_falls_idx.append(det)
+            else:
+                # Original binary check
+                ones_idx_window = [j for j in range(detection_window_start, detection_window_end + 1)
+                                   if loss_history[j] >= threshold]
+                if ones_idx_window:
+                    final_detected_falls_idx.append(det)
 
+        # Count of centroidZ-based candidates (before anomaly filtering)
         return final_detected_falls_idx, len(detected_falls_idx)
 
     def find_tpfpfn(self, detected_falls_idx, gt_start_falls, gt_predict_frames=None):
@@ -899,25 +924,21 @@ class compute_metric_early_predict:
 
         return falls_tp, falls_fp, falls_fn
 
-    def cal_roc_anomaly(self, loss_history, centroidZ_history, gt_start_falls, gt_predict_frames=None, method='drop', centroidVz_history=None, frame_duration=0.1):
+    def cal_roc_anomaly(self, loss_history, centroidZ_history, gt_start_falls, gt_predict_frames=None, method='drop', centroidVz_history=None, frame_duration=0.1, centroidZ_thr=0.6, weighted=False, weight_scale=1.0, weight_power=1.0):
         n_gt_falls = len(gt_start_falls)
-        print("How many falls?", n_gt_falls)
         tpr, fpr = [], []
-        centroidZ_thr = 0.6
         for threshold in np.arange(0.0, 10.0, 0.1):
-            detected_falls_idx, _ = self.detect_falls(loss_history, centroidZ_history, threshold, centroidZ_thr, method=method, centroidVz_history=centroidVz_history, frame_duration=frame_duration)
+            detected_falls_idx, _ = self.detect_falls(loss_history, centroidZ_history, threshold, centroidZ_thr, method=method, centroidVz_history=centroidVz_history, frame_duration=frame_duration, weighted=weighted, weight_scale=weight_scale, weight_power=weight_power)
             falls_tp, falls_fp, falls_fn = self.find_tpfpfn(detected_falls_idx, gt_start_falls, gt_predict_frames)
             tpr.append(len(falls_tp) / n_gt_falls)
             fpr.append(len(falls_fp))
         return tpr, fpr
 
-    def cal_roc_centroid(self, loss_history, centroidZ_history, gt_start_falls, gt_predict_frames=None, method='drop', centroidVz_history=None, frame_duration=0.1):
+    def cal_roc_centroid(self, loss_history, centroidZ_history, gt_start_falls, gt_predict_frames=None, method='drop', centroidVz_history=None, frame_duration=0.1, anomaly_thr=5, weighted=False, weight_scale=1.0, weight_power=1.0):
         n_gt_falls = len(gt_start_falls)
-        print("How many falls?", n_gt_falls)
         tpr, fpr = [], []
-        anomaly_thr = 5
-        for centroid_thr in np.arange(0.0, 0.6, 0.1):
-            detected_falls_idx, _ = self.detect_falls(loss_history, centroidZ_history, anomaly_thr, centroid_thr, method=method, centroidVz_history=centroidVz_history, frame_duration=frame_duration)
+        for centroid_thr in np.arange(0.0, 1.5, 0.02):
+            detected_falls_idx, _ = self.detect_falls(loss_history, centroidZ_history, anomaly_thr, centroid_thr, method=method, centroidVz_history=centroidVz_history, frame_duration=frame_duration, weighted=weighted, weight_scale=weight_scale, weight_power=weight_power)
 
             falls_tp, falls_fp, falls_fn = self.find_tpfpfn(detected_falls_idx, gt_start_falls, gt_predict_frames)
             tpr.append(len(falls_tp) / n_gt_falls)
@@ -1330,11 +1351,250 @@ for gap in [1, 2, 3]:
 # ----------------------------------------------------------------------------
 
 # Cell 14
-# --- Velocity-based ROC evaluation on DS2 ---
+# --- Find the largest anomaly threshold that gives exactly 2 FP per model/gap ---
+thresholds = np.arange(0.0, 10.0, 0.1)
+best_anomaly_thresholds = {}  # {(model_name, gap): threshold}
+
+for gap in [1, 2, 3]:
+    calculator = compute_metric_early_predict(prediction_gap=gap)
+    for model_name, loss_hist in [('HVRAE', HVRAE_loss_history),
+                                   ('HVRAE_SL', HVRAE_SL_loss_history),
+                                   ('RAE', RAE_loss_history)]:
+        tpr, fpr = calculator.cal_roc_anomaly(loss_hist, centroidZ_history, gt_start_falls, gt_predict_frames)
+        # Find all thresholds that give exactly 2 FP, pick the largest
+        candidates = [thresholds[i] for i in range(len(fpr)) if fpr[i] == 2]
+        if candidates:
+            best_thr = max(candidates)
+        else:
+            # No threshold gives exactly 2 FP; find the largest threshold with FP <= 2
+            candidates_leq = [thresholds[i] for i in range(len(fpr)) if fpr[i] <= 2]
+            best_thr = min(candidates_leq) if candidates_leq else thresholds[-1]
+            print(f"  WARNING: No threshold gives exactly 2 FP for {model_name} gap={gap}, using FP<=2 fallback: thr={best_thr:.1f}")
+        best_anomaly_thresholds[(model_name, gap)] = best_thr
+        # Find the TPR at this threshold
+        thr_idx = int(round(best_thr / 0.1))
+        print(f"gap={gap}, {model_name:10s}: best anomaly thr = {best_thr:.1f}, FP = {fpr[thr_idx]}, TPR = {tpr[thr_idx]:.2f}")
+
+# ----------------------------------------------------------------------------
+
+# Cell 15
+# --- Centroid threshold sweep: drop vs radar velocity (HVRAE only) ---
+centroidVz_numerical = numerical_velocity(centroidZ_history)
+centroid_thresholds = np.arange(0.0, 1.5, 0.02)
+
+linestyles = {'drop': '-', 'radar': '--'}
+
+for gap in [1, 2, 3]:
+    calculator = compute_metric_early_predict(prediction_gap=gap)
+    anom_thr = best_anomaly_thresholds[('HVRAE', gap)]
+
+    results = {}
+    for method_name, ls in linestyles.items():
+        if method_name == 'drop':
+            method_arg = 'drop'
+            vz_arg = None
+        else:
+            method_arg = 'velocity'
+            vz_arg = centroidVz_history
+
+        tpr, fpr = calculator.cal_roc_centroid(
+            HVRAE_loss_history, centroidZ_history, gt_start_falls, gt_predict_frames,
+            method=method_arg, centroidVz_history=vz_arg,
+            anomaly_thr=anom_thr,
+        )
+        results[method_name] = (tpr, fpr, ls, anom_thr)
+
+    # Plot 1: ROC (FP vs TPR)
+    plt.figure(figsize=(10, 6))
+    plt.xlim(-0.1, 31)
+    plt.xticks(np.arange(0, 32, 2))
+    plt.ylim(0.0, 1.1)
+    for method_name, (tpr, fpr, ls, anom_thr) in results.items():
+        plt.plot(fpr, tpr, color='r', linestyle=ls, linewidth=2,
+                 label=f'HVRAE {method_name} (anom={anom_thr:.1f})')
+    plt.title(f'DS2 Early Predict ROC (centroid sweep, gap={gap} frames)')
+    plt.xlabel('Number of False Alarms')
+    plt.ylabel('True Fall Detection Rate')
+    plt.legend(loc='lower right', fontsize='small')
+    plt.tight_layout()
+
+    # Plot 2: TPR vs centroid threshold
+    plt.figure(figsize=(10, 6))
+    plt.xlim(0.0, 1.5)
+    plt.ylim(0.0, 1.1)
+    for method_name, (tpr, fpr, ls, anom_thr) in results.items():
+        plt.plot(centroid_thresholds, tpr, color='r', linestyle=ls, linewidth=2,
+                 label=f'HVRAE {method_name} (anom={anom_thr:.1f})')
+    plt.title(f'DS2 Early Predict TPR vs Centroid Threshold (gap={gap} frames)')
+    plt.xlabel('Centroid Drop Threshold (m)')
+    plt.ylabel('True Fall Detection Rate')
+    plt.legend(loc='upper right', fontsize='small')
+    plt.tight_layout()
+
+    # Plot 3: FP vs centroid threshold
+    plt.figure(figsize=(10, 6))
+    plt.xlim(0.0, 1.5)
+    for method_name, (tpr, fpr, ls, anom_thr) in results.items():
+        plt.plot(centroid_thresholds, fpr, color='r', linestyle=ls, linewidth=2,
+                 label=f'HVRAE {method_name} (anom={anom_thr:.1f})')
+    plt.title(f'DS2 Early Predict FP Count vs Centroid Threshold (gap={gap} frames)')
+    plt.xlabel('Centroid Drop Threshold (m)')
+    plt.ylabel('Number of False Alarms')
+    plt.legend(loc='upper right', fontsize='small')
+    plt.tight_layout()
+
+# ----------------------------------------------------------------------------
+
+# Cell 16
+# --- Weighted centroid threshold sweep (HVRAE only) ---
+centroid_thresholds = np.arange(0.0, 1.5, 0.02)
+
+weighted_configs = [
+    ('radar', False, 1.0, 1.0),            # baseline: unweighted radar
+    ('radar w=2,s=1.0', True, 1.0, 2.0),   # weighted power=2, scale=1.0
+    ('radar w=2,s=1.5', True, 1.5, 2.0),   # weighted power=2, scale=1.5
+]
+linestyles_w = ['-', '--', ':']
+
+for gap in [1, 2, 3]:
+    calculator = compute_metric_early_predict(prediction_gap=gap)
+    anom_thr = best_anomaly_thresholds[('HVRAE', gap)]
+
+    results = {}
+    for (cfg_name, weighted, scale, power), ls in zip(weighted_configs, linestyles_w):
+        tpr, fpr = calculator.cal_roc_centroid(
+            HVRAE_loss_history, centroidZ_history, gt_start_falls, gt_predict_frames,
+            method='velocity', centroidVz_history=centroidVz_history,
+            anomaly_thr=anom_thr,
+            weighted=weighted, weight_scale=scale, weight_power=power,
+        )
+        results[cfg_name] = (tpr, fpr, ls, anom_thr)
+
+    # Plot 1: ROC (FP vs TPR)
+    plt.figure(figsize=(10, 6))
+    plt.xlim(-0.1, 31)
+    plt.xticks(np.arange(0, 32, 2))
+    plt.ylim(0.0, 1.1)
+    for cfg_name, (tpr, fpr, ls, anom_thr) in results.items():
+        plt.plot(fpr, tpr, color='r', linestyle=ls, linewidth=2,
+                 label=f'HVRAE {cfg_name} (anom={anom_thr:.1f})')
+    plt.title(f'DS2 Weighted Centroid Sweep ROC (gap={gap} frames)')
+    plt.xlabel('Number of False Alarms')
+    plt.ylabel('True Fall Detection Rate')
+    plt.legend(loc='lower right', fontsize='small')
+    plt.tight_layout()
+
+    # Plot 2: TPR vs centroid threshold
+    plt.figure(figsize=(10, 6))
+    plt.xlim(0.0, 1.5)
+    plt.ylim(0.0, 1.1)
+    for cfg_name, (tpr, fpr, ls, anom_thr) in results.items():
+        plt.plot(centroid_thresholds, tpr, color='r', linestyle=ls, linewidth=2,
+                 label=f'HVRAE {cfg_name} (anom={anom_thr:.1f})')
+    plt.title(f'DS2 Weighted TPR vs Centroid Threshold (gap={gap} frames)')
+    plt.xlabel('Centroid Drop Threshold (m)')
+    plt.ylabel('True Fall Detection Rate')
+    plt.legend(loc='upper right', fontsize='small')
+    plt.tight_layout()
+
+    # Plot 3: FP vs centroid threshold
+    plt.figure(figsize=(10, 6))
+    plt.xlim(0.0, 1.5)
+    for cfg_name, (tpr, fpr, ls, anom_thr) in results.items():
+        plt.plot(centroid_thresholds, fpr, color='r', linestyle=ls, linewidth=2,
+                 label=f'HVRAE {cfg_name} (anom={anom_thr:.1f})')
+    plt.title(f'DS2 Weighted FP vs Centroid Threshold (gap={gap} frames)')
+    plt.xlabel('Centroid Drop Threshold (m)')
+    plt.ylabel('Number of False Alarms')
+    plt.legend(loc='upper right', fontsize='small')
+    plt.tight_layout()
+
+# ----------------------------------------------------------------------------
+
+# Cell 17
+# --- Velocity-based ROC evaluation on DS2 (HVRAE only) ---
+centroidVz_numerical = numerical_velocity(centroidZ_history)
+
+linestyles = {'drop': '-', 'radar': '--'}
+
+for gap in [1, 2, 3]:
+    calculator = compute_metric_early_predict(prediction_gap=gap)
+    for cz_thr in [0.2, 0.4, 0.6, 0.8]:      
+        plt.figure(figsize=(10, 6))
+
+        for method_name, ls in linestyles.items():
+            if method_name == 'drop':
+                method_arg = 'drop'
+                vz_arg = None
+            else:
+                method_arg = 'velocity'
+                vz_arg = centroidVz_history
+
+            tpr, fpr = calculator.cal_roc_anomaly(
+                HVRAE_loss_history, centroidZ_history, gt_start_falls, gt_predict_frames,
+                method=method_arg, centroidVz_history=vz_arg,
+                centroidZ_thr=cz_thr,
+            )
+            plt.plot(fpr, tpr, color='r', linestyle=ls,
+                     linewidth=2, label=f'HVRAE ({method_name})')
+
+        plt.xlim(-0.1, 31)
+        plt.xticks(np.arange(0, 32, 2))
+        plt.ylim(0.0, 1.1)
+        plt.title(f'DS2 Velocity ROC (anomaly sweep, gap={gap}, centroidZ_thr={cz_thr})')
+        plt.xlabel('Number of False Alarms')
+        plt.ylabel('True Fall Detection Rate')
+        plt.legend(loc='lower right', fontsize='small')
+        plt.tight_layout()
+        plt.show()
+
+# ----------------------------------------------------------------------------
+
+# Cell 18
+# --- Weighted velocity-based ROC (HVRAE only) ---
+
+weighted_configs = [
+    ('drop',              'drop',     False, 1.0, 1.0, 'k'),
+    ('radar',             'velocity', False, 1.0, 1.0, 'r'),
+    ('radar w p=3,s=1.5', 'velocity', True,  1.5, 3.0, 'b'),
+    ('radar w p=3,s=1.0', 'velocity', True,  1.0, 3.0, 'c'),
+    ('radar w p=2,s=2.0', 'velocity', True,  2.0, 2.0, 'g'),
+    ('radar w p=3.5,s=1.0','velocity', True,  1.0, 3.5, 'm'),
+]
+
+for gap in [1, 2, 3]:
+    calculator = compute_metric_early_predict(prediction_gap=gap)
+    for cz_thr in [0.2, 0.4, 0.6, 0.8]:      
+        plt.figure(figsize=(10, 6))
+
+        for cfg_name, method_arg, weighted, scale, power, color in weighted_configs:
+            vz_arg = centroidVz_history if method_arg == 'velocity' else None
+            tpr, fpr = calculator.cal_roc_anomaly(
+                HVRAE_loss_history, centroidZ_history, gt_start_falls, gt_predict_frames,
+                method=method_arg, centroidVz_history=vz_arg,
+                centroidZ_thr=cz_thr,
+                weighted=weighted, weight_scale=scale, weight_power=power,
+            )
+            plt.plot(fpr, tpr, color=color, linestyle='-',
+                     linewidth=2, label=f'HVRAE ({cfg_name})')
+
+        plt.xlim(-0.1, 31)
+        plt.xticks(np.arange(0, 32, 2))
+        plt.ylim(0.0, 1.1)
+        plt.title(f'DS2 Weighted Velocity ROC (anomaly sweep, gap={gap}, centroidZ_thr={cz_thr})')
+        plt.xlabel('Number of False Alarms')
+        plt.ylabel('True Fall Detection Rate')
+        plt.legend(loc='lower right', fontsize='small')
+        plt.tight_layout()
+        plt.show()
+
+# ----------------------------------------------------------------------------
+
+# Cell 19
+# --- Compare radar (centroidZ_thr=0.4) vs drop (centroidZ_thr=0.6) ---
 centroidVz_numerical = numerical_velocity(centroidZ_history)
 
 colors = {'HVRAE': 'r', 'HVRAE_SL': 'b', 'RAE': 'g'}
-linestyles = {'drop': '-', 'radar': '--', 'numerical': ':'}
 loss_histories = {
     'HVRAE': HVRAE_loss_history,
     'HVRAE_SL': HVRAE_SL_loss_history,
@@ -1346,28 +1606,27 @@ for gap in [1, 2, 3]:
     plt.figure(figsize=(10, 6))
 
     for model_name, loss_hist in loss_histories.items():
-        for method_name, ls in linestyles.items():
-            if method_name == 'drop':
-                method_arg = 'drop'
-                vz_arg = None
-            elif method_name == 'radar':
-                method_arg = 'velocity'
-                vz_arg = centroidVz_history
-            else:  # numerical
-                method_arg = 'velocity'
-                vz_arg = centroidVz_numerical
+        # drop with centroidZ_thr=0.6
+        tpr_drop, fpr_drop = calculator.cal_roc_anomaly(
+            loss_hist, centroidZ_history, gt_start_falls, gt_predict_frames,
+            method='drop', centroidZ_thr=0.6,
+        )
+        plt.plot(fpr_drop, tpr_drop, color=colors[model_name], linestyle='-',
+                 linewidth=2, label=f'{model_name} drop (cZ=0.6)')
 
-            tpr, fpr = calculator.cal_roc_anomaly(
-                loss_hist, centroidZ_history, gt_start_falls, gt_predict_frames,
-                method=method_arg, centroidVz_history=vz_arg,
-            )
-            plt.plot(fpr, tpr, color=colors[model_name], linestyle=ls,
-                     linewidth=2, label=f'{model_name} ({method_name})')
+        # radar velocity with centroidZ_thr=0.4
+        tpr_radar, fpr_radar = calculator.cal_roc_anomaly(
+            loss_hist, centroidZ_history, gt_start_falls, gt_predict_frames,
+            method='velocity', centroidVz_history=centroidVz_history,
+            centroidZ_thr=0.4,
+        )
+        plt.plot(fpr_radar, tpr_radar, color=colors[model_name], linestyle='--',
+                 linewidth=2, label=f'{model_name} radar (cZ=0.4)')
 
     plt.xlim(-0.1, 31)
     plt.xticks(np.arange(0, 32, 2))
     plt.ylim(0.0, 1.1)
-    plt.title(f'DS2 Velocity ROC (anomaly sweep, gap={gap} frames)')
+    plt.title(f'Drop (cZ=0.6) vs Radar (cZ=0.4), gap={gap}')
     plt.xlabel('Number of False Alarms')
     plt.ylabel('True Fall Detection Rate')
     plt.legend(loc='lower right', fontsize='small', ncol=2)
@@ -1376,7 +1635,7 @@ for gap in [1, 2, 3]:
 
 # ----------------------------------------------------------------------------
 
-# Cell 15
+# Cell 20
 # --- Estimated vs actual centroidZ around GT falls ---
 centroidVz_numerical = numerical_velocity(centroidZ_history)
 centroidZ_np = np.array(centroidZ_history)
@@ -1418,7 +1677,7 @@ for gap in [1, 2, 3]:
 
 # ----------------------------------------------------------------------------
 
-# Cell 16
+# Cell 21
 plt.figure()
 plt.ylim(0.0, 2.2)
 plt.xlabel("Time in Seconds")
@@ -1473,7 +1732,7 @@ print("------------------")
 
 # ----------------------------------------------------------------------------
 
-# Cell 17
+# Cell 22
 # --- Debug: GT falls missed by HVRAE but caught by HVRAE_SL ---
 # Run detection at fixed thresholds for both models, compute TP/FP/FN,
 # then find GT falls that HVRAE misses (FN) but HVRAE_SL catches (TP).
@@ -1547,7 +1806,7 @@ for gt_first in missed_by_hvrae_caught_by_sl:
 
 # ----------------------------------------------------------------------------
 
-# Cell 18
+# Cell 23
 # --- Debug: HVRAE false positives not present in HVRAE_SL ---
 # Re-cluster detections to get actual frame indices per cluster
 hvrae_clusters = cluster_detections(hvrae_detected)
@@ -1603,7 +1862,7 @@ for ci, cluster in enumerate(hvrae_only_fp):
 
 # ----------------------------------------------------------------------------
 
-# Cell 19
+# Cell 24
 # --- Debug: HVRAE_SL false positives not present in HVRAE ---
 hvrae_sl_only_fp = [c for c in hvrae_sl_fp_clusters if not cluster_overlaps(c, hvrae_fp_clusters)]
 
