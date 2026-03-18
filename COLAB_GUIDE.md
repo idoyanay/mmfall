@@ -1,12 +1,12 @@
-# Running mmfall on Google Colab
+# Running mmPredict on Google Colab
 
 ## 1. Upload the Repository to Google Drive
 
-Upload the entire `mmfall/` project folder to your Google Drive. The expected structure:
+Upload the entire `mmpredict/` project folder to your Google Drive. The expected structure:
 
 ```
 My Drive/
-  mmfall/
+  mmpredict/
     data/
       DS0/DS0.npy
       DS1/DS1_4falls.npy, DS1_4normal.npy, ...
@@ -18,7 +18,7 @@ My Drive/
       HVRAE_SL_mdl.h5
       RAE_mdl.h5
     src/
-      mmfall.ipynb
+      mmpredict.ipynb
 ```
 
 ## 2. Setup Cell (Mount Drive + Keras Compatibility)
@@ -47,12 +47,12 @@ The notebook defines `project_path` as a local absolute path. Update it to point
 
 **Find (in the cell that sets `project_path`):**
 ```python
-project_path = '/Users/idoyanay/projects/personal_projects/mmfall/'
+project_path = '/Users/idoyanay/projects/personal_projects/mmpredict/'
 ```
 
 **Replace with:**
 ```python
-project_path = '/content/drive/MyDrive/mmfall/'
+project_path = '/content/drive/MyDrive/mmpredict/'
 ```
 
 Adjust the path if you placed the folder somewhere other than the Drive root.
@@ -144,5 +144,5 @@ Make sure `data/DS0/DS0.npy` is uploaded to Drive if you want to preprocess from
 |---|---|---|
 | Mount Drive | New first cell | `drive.mount('/content/drive')` |
 | Keras 2 compat | Same first cell, before any imports | `!pip install tf_keras` + `os.environ["TF_USE_LEGACY_KERAS"] = "1"` |
-| `project_path` | Cell that defines it | Change to `'/content/drive/MyDrive/mmfall/'` |
+| `project_path` | Cell that defines it | Change to `'/content/drive/MyDrive/mmpredict/'` |
 | Runtime type | Colab menu | Runtime > Change runtime type > GPU |

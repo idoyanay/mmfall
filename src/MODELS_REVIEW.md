@@ -95,7 +95,7 @@ The RAE is the simplest of the three models. It learns a deterministic mapping f
 **HVRAE and HVRAE_SL** — VAE encoder producing mean and log-variance, with reparameterization sampling:
 
 ```python
-# mmfall.py lines 180-194 (HVRAE), lines 359-373 (HVRAE_SL) — identical
+# mmpredict.py lines 180-194 (HVRAE), lines 359-373 (HVRAE_SL) — identical
 input_flatten           = TimeDistributed(Dense(n_intermidiate, activation='tanh'))(input_flatten)
 Z_mean                  = TimeDistributed(Dense(n_latentdim, activation=None), name='qzx_mean')(input_flatten)
 Z_log_var               = TimeDistributed(Dense(n_latentdim, activation=None), name='qzx_log_var')(input_flatten)
@@ -112,7 +112,7 @@ Z                       = Lambda(sampling)([Z_mean, Z_log_var])
 **RAE** — deterministic encoder, no sampling:
 
 ```python
-# mmfall.py lines 517-519
+# mmpredict.py lines 517-519
 encoder_feature         = TimeDistributed(Dense(n_intermidiate, activation='tanh'))(input_flatten)
 encoder_feature         = TimeDistributed(Dense(n_latentdim, activation='tanh'))(encoder_feature)
 ```
@@ -124,7 +124,7 @@ Note: RAE uses `activation='tanh'` on the latent projection, while HVRAE/HVRAE_S
 All three models share the same RNN autoencoder structure:
 
 ```python
-# Identical in all three (mmfall.py lines 197-200, 376-379, 522-525)
+# Identical in all three (mmpredict.py lines 197-200, 376-379, 522-525)
 encoder_feature         = SimpleRNN(n_latentdim, activation='tanh', return_sequences=False)(...)
 decoder_feature         = RepeatVector(n_frames)(encoder_feature)
 decoder_feature         = SimpleRNN(n_latentdim, activation='tanh', return_sequences=True)(decoder_feature)
@@ -136,7 +136,7 @@ decoder_feature         = Lambda(lambda x: tf.reverse(x, axis=[-2]))(decoder_fea
 **HVRAE** — outputs both mean and log-variance, concatenated into 8 features per point:
 
 ```python
-# mmfall.py lines 202-211
+# mmpredict.py lines 202-211
 X_latent                = TimeDistributed(Dense(n_intermidiate, activation='tanh'))(decoder_feature)
 pXz_mean                = TimeDistributed(Dense(n_features, activation=None))(X_latent)
 pXz_logvar              = TimeDistributed(Dense(n_features, activation=None))(X_latent)
@@ -149,7 +149,7 @@ outputs                 = TimeDistributed(Reshape((n_points, n_features*2)))(pXz
 **HVRAE_SL** — outputs only mean, 4 features per point:
 
 ```python
-# mmfall.py lines 381-388
+# mmpredict.py lines 381-388
 X_latent                = TimeDistributed(Dense(n_intermidiate, activation='tanh'))(decoder_feature)
 pXz_mean                = TimeDistributed(Dense(n_features, activation=None))(X_latent)
 
@@ -160,7 +160,7 @@ outputs                 = TimeDistributed(Reshape((n_points, n_features)))(pXz_m
 **RAE** — direct reconstruction through dense layers:
 
 ```python
-# mmfall.py lines 528-532
+# mmpredict.py lines 528-532
 decoder_feature         = TimeDistributed(Dense(n_intermidiate, activation='tanh'))(decoder_feature)
 decoder_feature         = TimeDistributed(Dense(n_points*n_features, activation='tanh'))(decoder_feature)
 outputs                 = TimeDistributed(Reshape((n_points, n_features)))(decoder_feature)  # shape: (10, 64, 4)
@@ -173,7 +173,7 @@ Key difference: RAE's final dense layer outputs `n_points * n_features = 256` va
 **HVRAE** — Gaussian log-likelihood + KL:
 
 ```python
-# mmfall.py lines 218-241
+# mmpredict.py lines 218-241
 mean   = y_pred[:, :, :, :n_features]      # first 4 channels
 logvar = y_pred[:, :, :, n_features:]       # last 4 channels
 var    = K.exp(logvar)
@@ -186,7 +186,7 @@ loss     = K.mean(log_pXz + kl_loss)
 **HVRAE_SL** — MSE + KL:
 
 ```python
-# mmfall.py lines 395-416
+# mmpredict.py lines 395-416
 mean = y_pred  # output IS the mean (no logvar to split)
 
 log_pXz  = mse(y_true_reshape, mean)         # standard MSE
@@ -197,7 +197,7 @@ loss     = K.mean(log_pXz + kl_loss)
 **RAE** — plain MSE (built-in):
 
 ```python
-# mmfall.py lines 539-541
+# mmpredict.py lines 539-541
 self.RAE_mdl.compile(optimizer=adam, loss=mse)  # no custom loss function
 ```
 
@@ -206,7 +206,7 @@ self.RAE_mdl.compile(optimizer=adam, loss=mse)  # no custom loss function
 **HVRAE and HVRAE_SL** require extracting `Z_mean` and `Z_log_var` from intermediate layers to compute the full loss (including KL divergence) at inference time:
 
 ```python
-# mmfall.py lines 297-298 (HVRAE), lines 458-459 (HVRAE_SL)
+# mmpredict.py lines 297-298 (HVRAE), lines 458-459 (HVRAE_SL)
 get_z_mean_model    = Model(inputs=model.input, outputs=model.get_layer('qzx_mean').output)
 get_z_log_var_model = Model(inputs=model.input, outputs=model.get_layer('qzx_log_var').output)
 
@@ -217,7 +217,7 @@ current_loss = HVRAE_loss(pattern, current_prediction, predicted_z_mean, predict
 **RAE** uses the built-in MSE loss directly via `test_on_batch`:
 
 ```python
-# mmfall.py lines 564-567
+# mmpredict.py lines 564-567
 for pattern in inferencedata:
     pattern      = np.expand_dims(pattern, axis=0)
     current_loss = model.test_on_batch(pattern, pattern)  # built-in MSE

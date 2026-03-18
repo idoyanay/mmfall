@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-mmFall is a fall detection system using a 4D mmWave radar (Texas Instruments AWR1843BOOST) and a Hybrid Variational RNN AutoEncoder (HVRAE). The system is trained exclusively on normal Activities of Daily Living (ADL), then detects falls as anomalies at inference time — a semi-supervised approach requiring no fall data for training.
+mmPredict extends the [mmFall](https://github.com/radar-lab/mmfall) project from post-hoc fall detection to early fall prediction using a 4D mmWave radar (Texas Instruments AWR1843BOOST) and a Hybrid Variational RNN AutoEncoder (HVRAE). The system is trained exclusively on normal Activities of Daily Living (ADL), then detects falls as anomalies at inference time — a semi-supervised approach requiring no fall data for training. Our contributions add causal/predictive evaluation (`compute_metric_early_predict`), velocity-based extrapolation, and weighted anomaly detection.
 
-The primary reference for results is the notebook `src/mmfall.ipynb`. The paper is at https://arxiv.org/abs/2003.02386.
+The primary reference for results is the notebook `src/mmpredict.ipynb`. The base paper is at https://arxiv.org/abs/2003.02386.
 
 ## Environment Setup
 
@@ -23,10 +23,10 @@ The `venv/` uses Python 3.13. Note that `requirements.txt` only pins data/plotti
 
 The main entry point is the Jupyter notebook:
 ```bash
-jupyter notebook src/mmfall.ipynb
+jupyter notebook src/mmpredict.ipynb
 ```
 
-`src/mmfall.py` is a standalone script version of the same logic (same classes, same architecture).
+`src/mmpredict.py` is a standalone script version of the same logic (same classes, same architecture).
 
 Utility scripts at the project root are run directly:
 ```bash
@@ -100,5 +100,5 @@ Multiple recording sessions can be merged with `combine.py` (adjusts ground trut
 ## General Notes and Instructions
 
 ### Notebook Editing — MANDATORY
-When reading, editing, or making ANY changes to `.ipynb` files, you MUST use the `read_and_update_ipynb` skill. Do NOT use the built-in `NotebookEdit` tool or read `.ipynb` JSON directly. Always invoke the skill first. This applies to `src/mmfall.ipynb` and any other notebook in the project.
+When reading, editing, or making ANY changes to `.ipynb` files, you MUST use the `read_and_update_ipynb` skill. Do NOT use the built-in `NotebookEdit` tool or read `.ipynb` JSON directly. Always invoke the skill first. This applies to `src/mmpredict.ipynb` and any other notebook in the project.
 

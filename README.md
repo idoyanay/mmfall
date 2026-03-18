@@ -1,24 +1,21 @@
-# mmFall: Fall Detection using 4D MmWave Radar and a Hybrid Variational RNN AutoEncoder
+# mmPredict — Early Fall Prediction using 4D MmWave Radar
 
-Based on the paper: https://arxiv.org/abs/2003.02386
+mmPredict extends the [mmFall](https://github.com/radar-lab/mmfall) project (paper: [arXiv:2003.02386](https://arxiv.org/abs/2003.02386)) from post-hoc fall **detection** to early fall **prediction**. The base project detects falls after they happen using a centered-window algorithm; mmPredict predicts falls before they complete using velocity-based extrapolation and causal anomaly detection.
 
-## Project Description
+## What mmFall provides (base project)
 
-Elderly fall prevention and detection becomes extremely crucial with the fast aging population globally. mmFall is a fall detection system that uses (i) a millimeter-wave (mmWave) radar sensor (TI AWR1843BOOST) to collect the human body's point cloud along with the body centroid, and (ii) a Hybrid Variational RNN AutoEncoder (HVRAE) to compute the anomaly level of the body motion. A fall is detected when a spike in anomaly level and a drop in centroid height occur simultaneously.
+- 4D mmWave radar data pipeline (TI AWR1843BOOST point cloud → motion patterns)
+- HVRAE (Hybrid Variational RNN AutoEncoder) trained on normal ADL only (semi-supervised)
+- `compute_metric`: post-hoc fall detection using a centered 20-frame window
+- Datasets DS0/DS1/DS2
 
-The system is trained exclusively on normal Activities of Daily Living (ADL) in a semi-supervised approach -- no fall data is needed for training. At inference, the HVRAE generates a spike in anomaly level when an abnormal motion (such as a fall) occurs.
+## What mmPredict adds
 
-## Proposed mmFall System
+- **`compute_metric_early_predict`** — causal, predictive evaluator using a backward-looking 10-frame window. Reports the earliest frame of each detected fall. TP matching rewards early detection: a detection counts as TP if it occurs at or before `GT + 5 frames`.
+- **Velocity-based extrapolation** (`method='velocity'`) — uses centroidZ velocity to predict where the person will be `prediction_gap` frames in the future, enabling detection before the fall completes.
+- **Weighted anomaly detection** (`weighted=True`) — lowers the effective anomaly threshold proportionally to the severity of the predicted fall, improving sensitivity to large predicted drops.
 
-![mmfall](https://github.com/radar-lab/mmfall/blob/master/misc/mmfall.png)
-
-## Experiment Setup
-
-![Hardware Setup](https://github.com/radar-lab/mmfall/blob/master/misc/hardware_setup.png)
-
-## Video Presentation
-
-[![videopresentation](https://github.com/radar-lab/mmfall/blob/master/misc/0.jpg)](https://drive.google.com/file/d/1aClSbmZ-mjsR8Ap6FQAud667QbaYWerg/view?usp=sharing)
+See [src/compute_metric_early_predict.md](src/compute_metric_early_predict.md) for the full algorithm description.
 
 ## Setup
 
@@ -35,10 +32,10 @@ pip install tensorflow keras
 
 The main entry point is the Jupyter notebook:
 ```bash
-jupyter notebook src/mmfall.ipynb
+jupyter notebook src/mmpredict.ipynb
 ```
 
-`src/mmfall.py` is an auto-generated script version of the same notebook code.
+`src/mmpredict.py` is an auto-generated script version of the same notebook code.
 
 Utility scripts:
 ```bash
@@ -49,7 +46,7 @@ python data_analyzer.py --test <test.npy> --prediction <pred.npy> --raw <raw.npy
 
 ## Models
 
-All three models share input shape `(10, 64, 4)` -- 10 frames, 64 points, 4 features (`delta_x, delta_y, z, Doppler`).
+All three models share input shape `(10, 64, 4)` — 10 frames, 64 points, 4 features (`delta_x, delta_y, z, Doppler`).
 
 | Model | Architecture | Loss | Output |
 |---|---|---|---|
@@ -71,9 +68,7 @@ Trained with Adam (lr=0.001), 5 epochs, batch size 8. Saved weights in `saved_mo
 
 ### Base: `compute_metric` (post-hoc)
 
-The original algorithm from the base project. Uses a 20-frame centered (symmetric) window for both centroidZ drop detection and anomaly matching. A fall is detected when a height drop >= 0.6 m and an anomaly spike above threshold co-occur in the same window. TP matching uses a symmetric +-10-frame window around ground truth.
-
-See the [base project](https://github.com/radar-lab/mmfall) for full details.
+The original algorithm from the [base mmFall project](https://github.com/radar-lab/mmfall). Uses a 20-frame centered (symmetric) window for both centroidZ drop detection and anomaly matching. A fall is detected when a height drop >= 0.6 m and an anomaly spike above threshold co-occur in the same window. TP matching uses a symmetric +-10-frame window around ground truth.
 
 ### Early prediction: `compute_metric_early_predict` (causal)
 
@@ -102,11 +97,9 @@ effective_threshold = threshold / weight
 
 A larger predicted drop from the person's own starting height produces a higher weight, lowering the anomaly threshold needed to confirm the fall. Parameters `scale` and `power` control the strength and shape of this relationship.
 
-See [src/compute_metric_early_predict.md](src/compute_metric_early_predict.md) for the full algorithm description.
-
 ## Results
 
-The base project achieves 98% detection out of 50 falls with just 2 false alarms using the post-hoc `compute_metric` evaluator.
+The base mmFall project achieves 98% detection out of 50 falls with just 2 false alarms using the post-hoc `compute_metric` evaluator.
 
 The notebook includes ROC curves comparing all three models across:
 - Anomaly threshold sweeps (fixed centroidZ threshold)
