@@ -13,11 +13,6 @@ os.environ["TF_USE_LEGACY_KERAS"] = "1"
 # ----------------------------------------------------------------------------
 
 # Cell 2
-
-
-# ----------------------------------------------------------------------------
-
-# Cell 3
 # Author: Feng Jin. Contact info: fengjin@email.arizona.edu
 import argparse, os
 import matplotlib.pyplot as plt
@@ -701,7 +696,7 @@ class autoencoder_mdl:
 
 # ----------------------------------------------------------------------------
 
-# Cell 4
+# Cell 3
 class compute_metric:
     def __init__(self):
         pass
@@ -830,7 +825,7 @@ class compute_metric_early_predict:
 
         return final_detected_falls_idx, len(detected_falls_idx)
 
-    def find_tpfpfn(self, detected_falls_idx, gt_start_fall, gt_predict_frames=None):
+    def find_tpfpfn(self, detected_falls_idx, gt_start_falls, gt_predict_frames=None):
         cluster_win_len = 20
         # Step 1: Cluster raw detections (store actual detection values per cluster)
         clustered_falls = []
@@ -850,7 +845,7 @@ class compute_metric_early_predict:
         matched_gt_indices = set()
         tp_cluster_indices = set()
         for cluster_idx, cluster_dets in enumerate(clustered_falls):
-            for gt_idx, gt_first in enumerate(gt_start_fall):
+            for gt_idx, gt_first in enumerate(gt_start_falls):
                 if gt_idx in matched_gt_indices:
                     continue
                 window_start = int(gt_first - self.lower_bound)
@@ -872,911 +867,650 @@ class compute_metric_early_predict:
             falls_fp.append(i)
         falls_tp = list(matched_gt_indices)
 
-        falls_fn = [gt_start_fall[i] for i in range(len(gt_start_fall)) if i not in matched_gt_indices]
+        falls_fn = [gt_start_falls[i] for i in range(len(gt_start_falls)) if i not in matched_gt_indices]
 
         # Sanity check: every GT fall is either TP or FN
-        assert len(falls_tp) + len(falls_fn) == len(gt_start_fall), \
-            f"TP + FN \!= GT falls: {len(falls_tp)} + {len(falls_fn)} \!= {len(gt_start_fall)}"
+        assert len(falls_tp) + len(falls_fn) == len(gt_start_falls), \
+            f"TP + FN \!= GT falls: {len(falls_tp)} + {len(falls_fn)} \!= {len(gt_start_falls)}"
 
         return falls_tp, falls_fp, falls_fn
 
-    def cal_roc_anomaly(self, loss_history, centroidZ_history, gt_start_fall, gt_predict_frames=None):
-        n_gt_falls = len(gt_start_fall)
+    def cal_roc_anomaly(self, loss_history, centroidZ_history, gt_start_falls, gt_predict_frames=None):
+        n_gt_falls = len(gt_start_falls)
         print("How many falls?", n_gt_falls)
         tpr, fpr = [], []
         centroidZ_thr = 0.6
         for threshold in np.arange(0.0, 10.0, 0.1):
             detected_falls_idx, _ = self.detect_falls(loss_history, centroidZ_history, threshold, centroidZ_thr)
-            falls_tp, falls_fp, falls_fn = self.find_tpfpfn(detected_falls_idx, gt_start_fall, gt_predict_frames)
+            falls_tp, falls_fp, falls_fn = self.find_tpfpfn(detected_falls_idx, gt_start_falls, gt_predict_frames)
             tpr.append(len(falls_tp) / n_gt_falls)
             fpr.append(len(falls_fp))
         return tpr, fpr
 
-    def cal_roc_centroid(self, loss_history, centroidZ_history, gt_start_fall, gt_predict_frames=None):
-        n_gt_falls = len(gt_start_fall)
+    def cal_roc_centroid(self, loss_history, centroidZ_history, gt_start_falls, gt_predict_frames=None):
+        n_gt_falls = len(gt_start_falls)
         print("How many falls?", n_gt_falls)
         tpr, fpr = [], []
         anomaly_thr = 5
         for centroid_thr in np.arange(0.0, 0.6, 0.1):
             detected_falls_idx, _ = self.detect_falls(loss_history, centroidZ_history, anomaly_thr, centroid_thr)
 
-            falls_tp, falls_fp, falls_fn = self.find_tpfpfn(detected_falls_idx, gt_start_fall, gt_predict_frames)
+            falls_tp, falls_fp, falls_fn = self.find_tpfpfn(detected_falls_idx, gt_start_falls, gt_predict_frames)
             tpr.append(len(falls_tp) / n_gt_falls)
             fpr.append(len(falls_fp))
         return tpr, fpr
 
 # ----------------------------------------------------------------------------
 
-# Cell 5
-if __name__ == '__main__':
-    # project_path = '/Users/idoyanay/projects/personal_projects/mmfall/'
-    project_path = '/content/drive/MyDrive/mmfall/'
+# Cell 4
+# project_path = '/Users/idoyanay/projects/personal_projects/mmfall/'
+project_path = '/content/drive/MyDrive/mmfall/'
 
-    # # Generate the motion pattern from the original normal dataset. The proposed oversampling method is included.
-    # # Uncomment if you want to regenerate the data. It may take a long time.
-    # #####################################################################################################
-    # print("*********************************************************************")
-    # # Load the normal data file and preprocess the data
-    # print("INFO: Start preprocessing the normal training dataset...")
-    # train_data, test_data= data_preproc().load_bin(project_path + 'data/DS0/DS0.npy', fortrain=True)
-    # # Save the normal training and testing dataset
-    # np.save(project_path + 'data/normal_train_data', np.array(train_data))
-    # print("INFO: The train_data is saved in " + save_datapath + 'data/normal_train_data' + ".npy")
-    # np.save(project_path + 'data/normal_test_data', np.array(test_data))
-    # print("INFO: The test_data is saved in " + save_datapath + 'data/normal_test_data' + ".npy")
-    # #####################################################################################################
+def plot_fall_window(gt_frame, centroidZ_history, loss_histories,
+                     plot_margin=30, win_len=10, title=None,
+                     gt_label="fall_frame", threshold_line=None,
+                     mark_detections=None):
+    """
+    Dual-axis plot: centroidZ (left y) + anomaly scores (right y) around gt_frame.
+
+    Args:
+        gt_frame: center frame index
+        centroidZ_history: list/array of centroid heights
+        loss_histories: dict of {name: (loss_array, color)}
+        plot_margin: frames before/after gt_frame to show
+        win_len: anomaly window length for alignment (default 10)
+        title: plot title
+        gt_label: label for the GT vertical line
+        threshold_line: if set, draw horizontal line on anomaly axis
+        mark_detections: list of frame indices to mark with vertical lines
+    """
+    gt_frame = int(gt_frame)
+    plot_lo = max(0, gt_frame - plot_margin)
+    plot_hi = min(len(centroidZ_history), gt_frame + plot_margin + 1)
+    frames = np.arange(plot_lo, plot_hi)
+
+    # Aligned anomaly: loss_history[j] covers frames [j, j+win_len-1],
+    # so the anomaly "ending" at frame i is loss_history[i - (win_len-1)].
+    first_loss = list(loss_histories.values())[0][0]
+    anom_lo = max(0, plot_lo - (win_len - 1))
+    anom_hi = min(len(first_loss), plot_hi - (win_len - 1))
+    anom_frames = np.arange(anom_lo + (win_len - 1), anom_hi + (win_len - 1))
+
+    fig, ax1 = plt.subplots(figsize=(12, 4))
+    ax1.set_xlabel("Frame")
+    ax1.set_ylabel("Centroid Z (m)", color="k")
+    ax1.plot(frames, centroidZ_history[plot_lo:plot_hi], "k-", linewidth=2, label="centroidZ")
+    ax1.tick_params(axis="y", labelcolor="k")
+
+    ax2 = ax1.twinx()
+    ax2.set_ylabel("Anomaly Score (aligned)", color="gray")
+    for name, (loss_arr, color) in loss_histories.items():
+        ax2.plot(anom_frames, loss_arr[anom_lo:anom_hi], color + "-", linewidth=1.5, label=name)
+    ax2.tick_params(axis="y", labelcolor="gray")
+
+    if threshold_line is not None:
+        ax2.axhline(y=threshold_line, color="gray", linestyle="--", alpha=0.5, label=f"threshold={threshold_line}")
+
+    ax1.axvline(x=gt_frame, color="orange", linestyle="--", linewidth=2, label=f"{gt_label}={gt_frame}")
+
+    if mark_detections:
+        for det_frame in mark_detections:
+            ax1.axvline(x=det_frame, color="red", linestyle=":", linewidth=1, alpha=0.7)
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize="small")
+    if title:
+        plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+def cluster_detections(detected_falls_idx, cluster_win_len=20):
+    clustered = []
+    i = 0
+    while i < len(detected_falls_idx):
+        j = i
+        while j < len(detected_falls_idx) and detected_falls_idx[j] - detected_falls_idx[i] <= cluster_win_len:
+            j += 1
+        clustered.append(detected_falls_idx[i:j])
+        i = j
+    return clustered
+
+def cluster_overlaps(cluster, other_clusters, margin=20):
+    c_min, c_max = min(cluster), max(cluster)
+    for oc in other_clusters:
+        oc_min, oc_max = min(oc), max(oc)
+        if c_min <= oc_max + margin and c_max >= oc_min - margin:
+            return True
+    return False
+
+def local_maxima_top_n(numbers, n=4, window=15):
+    candidates = []
+    for i, val in enumerate(numbers):
+        lo = max(0, i - window)
+        hi = min(len(numbers), i + window + 1)
+        if val == max(numbers[lo:hi]):
+            candidates.append((val, i))
+    candidates.sort(reverse=True)
+    return candidates[:n]
+
+# ----------------------------------------------------------------------------
+
+# Cell 5
+# Load inference dataset and the ground truth timesheet
+inferencedata_file_falls                      = project_path + 'data/DS1/DS1_4falls'
+inferencedata_falls, centroidZ_history_falls        = data_preproc().load_bin(inferencedata_file_falls + '.npy', fortrain=False)
+
+inferencedata_file_normal                      = project_path + 'data/DS1/DS1_4normal'
+inferencedata_normal, centroidZ_history_normal        = data_preproc().load_bin(inferencedata_file_normal + '.npy', fortrain=False)
+
+# ---- concatinate the falls and normal data for better initial testing ---- #
+inferencedata_falls_normal = inferencedata_falls + inferencedata_normal
+centroidZ_history_falls_normal = centroidZ_history_falls + centroidZ_history_normal
+
+# --- calculate the gt_falls_idx (by knowing that there are only 4 falls)
+centroidZ_history_np = np.array(centroidZ_history_falls)
+n = len(centroidZ_history_np)
+window_size = 100
+
+# Find the index of the minimum value in each 100-sample window
+window_mins = []
+for start in range(0, n, window_size):
+    end = min(start + window_size, n)
+    window = centroidZ_history_np[start:end]
+    local_min_idx = np.argmin(window) + start  # offset by window start
+    window_mins.append((centroidZ_history_np[local_min_idx], local_min_idx))
+
+# Sort by value and take the 4 smallest
+window_mins.sort(key=lambda x: x[0])
+gt_falls_idx = [idx for _, idx in window_mins[:4]]
+
+
+# Load the models
+model                                   = autoencoder_mdl(model_dir = project_path + 'saved_model/')
+
+HVRAE_loss_history_falls                       = model.HVRAE_predict(inferencedata_falls)
+HVRAE_loss_history_normal                       = model.HVRAE_predict(inferencedata_normal)
+
+HVRAE_SL_loss_history_falls                    = model.HVRAE_SL_predict(inferencedata_falls)
+HVRAE_SL_loss_history_normal                    = model.HVRAE_SL_predict(inferencedata_normal)
+
+RAE_loss_history_falls                        = model.RAE_predict(inferencedata_falls)
+RAE_loss_history_normal                        = model.RAE_predict(inferencedata_normal)
+
+HVRAE_loss_history_falls_normal = HVRAE_loss_history_falls + HVRAE_loss_history_normal
+HVRAE_SL_loss_history_falls_normal = HVRAE_SL_loss_history_falls + HVRAE_SL_loss_history_normal
+RAE_loss_history_falls_normal = RAE_loss_history_falls + RAE_loss_history_normal
 
 # ----------------------------------------------------------------------------
 
 # Cell 6
-    # # Uncomment if you want to retrain the models. It may take a long time. And you may expect slightly changes in the results as training progress has lot of random things.
-    # # Or you can skip this section, go to next and load the saved models to check the results.
-    # # Train and save the model
-    # print("INFO: Load train/test data...")
-    # train_data      = np.load(project_path + 'data/normal_train_data.npy', allow_pickle=True)
-    # test_data       = np.load(project_path + 'data/normal_test_data.npy', allow_pickle=True)
-    # print("INFO: Start HVRAE/HVRAE_SL/RAE model training and testing...")
-    # model = autoencoder_mdl(model_dir = (project_path + 'saved_model/'))
-    # model.HVRAE_train(train_data, test_data)
-    # model.HVRAE_SL_train(train_data, test_data)
-    # model.RAE_train(train_data, test_data)
+# --- Visualize each DS1 fall with centroidZ and anomaly histories ---
+centroidZ_falls_np = np.array(centroidZ_history_falls)
 
-    ## our edit
-    # path = r'C:/Users/idosy/uni_projects/mmfall/saved_model/HVRAE_mdl.h5'
+gt_falls_idx_sorted = sorted(gt_falls_idx)
+print(f"Number of DS1 falls: {len(gt_falls_idx_sorted)}")
+print(f"Fall frames: {gt_falls_idx_sorted}")
+print()
 
-    # import os
-    # print(f"File size: {os.path.getsize(path)} bytes")
-
-    # with open(path, 'rb') as f:
-    #     header = f.read(50)
-    #     print(f"Header: {header}")
+for fi, gt_hit in enumerate(gt_falls_idx_sorted):
+    plot_fall_window(
+        gt_frame=gt_hit,
+        centroidZ_history=centroidZ_history_falls,
+        loss_histories={
+            "HVRAE": (HVRAE_loss_history_falls, "r"),
+            "HVRAE_SL": (HVRAE_SL_loss_history_falls, "b"),
+            "RAE": (RAE_loss_history_falls, "g"),
+        },
+        gt_label="fall_frame",
+        title=f"DS1 fall {fi+1}/{len(gt_falls_idx_sorted)}: frame {int(gt_hit)} (centroidZ={centroidZ_falls_np[int(gt_hit)]:.3f})",
+    )
 
 # ----------------------------------------------------------------------------
 
 # Cell 7
-    # Load inference dataset and the ground truth timesheet
-    inferencedata_file_falls                      = project_path + 'data/DS1/DS1_4falls'
-    inferencedata_falls, centroidZ_history_falls        = data_preproc().load_bin(inferencedata_file_falls + '.npy', fortrain=False)
+# Load inference dataset and the ground truth timesheet
+inferencedata_file                      = project_path + 'data/DS2/DS2'
+inferencedata, centroidZ_history        = data_preproc().load_bin(inferencedata_file + '.npy', fortrain=False)
+# Ground truth time index file exists
+if os.path.exists(inferencedata_file + '.csv'):
+    gt_falls_idx                        = np.genfromtxt(inferencedata_file + '.csv', delimiter=',').astype(int)
+# Maybe this file doesn't contain any falls
+else:
+    gt_falls_idx                        = []
 
-    inferencedata_file_normal                      = project_path + 'data/DS1/DS1_4normal'
-    inferencedata_normal, centroidZ_history_normal        = data_preproc().load_bin(inferencedata_file_normal + '.npy', fortrain=False)
+# Load the models
+model                                   = autoencoder_mdl(model_dir = project_path + 'saved_model/')
+HVRAE_loss_history                       = model.HVRAE_predict(inferencedata)
+HVRAE_SL_loss_history                    = model.HVRAE_SL_predict(inferencedata)
+RAE_loss_history                        = model.RAE_predict(inferencedata)
 
-    # ---- concatinate the falls and normal data for better initial testing ---- #
-    inferencedata_falls_normal = inferencedata_falls + inferencedata_normal
-    centroidZ_history_falls_normal = centroidZ_history_falls + centroidZ_history_normal
-
-    # --- calculate the gt_falls_idx (by knowing that there are only 4 falls)
-    centroidZ_history_np = np.array(centroidZ_history_falls)
-    n = len(centroidZ_history_np)
-    window_size = 100
-
-    # Find the index of the minimum value in each 100-sample window
-    window_mins = []
-    for start in range(0, n, window_size):
-        end = min(start + window_size, n)
-        window = centroidZ_history_np[start:end]
-        local_min_idx = np.argmin(window) + start  # offset by window start
-        window_mins.append((centroidZ_history_np[local_min_idx], local_min_idx))
-
-    # Sort by value and take the 4 smallest
-    window_mins.sort(key=lambda x: x[0])
-    gt_falls_idx = [idx for _, idx in window_mins[:4]]
 
 
 # ----------------------------------------------------------------------------
 
 # Cell 8
+# Create DS2_PREDICT: expand each GT fall to all adjacent frames with centroidZ < threshold
+centroid_thr = 0.6
+search_radius = 10
+gt_falls_predict_idx = set()
+gt_falls_predict_idx_firsts = set()
+centroidZ_np = np.array(centroidZ_history)
+n_labeled = 0
+n_skipped = 0
 
-    # Load the models
-    model                                   = autoencoder_mdl(model_dir = project_path + 'saved_model/')
+for gt_frame in gt_falls_idx:
+    current_fall_indexes = set()
+    anchor = int(gt_frame)
+    # print(f"frame index: {gt_frame}, centroid height: {centroidZ_np[anchor]:.3g}")
+    print(f"gt_frame index: {anchor}")
+    # If the GT frame itself isn't below threshold, search nearby for the closest one
+    if centroidZ_np[anchor] > centroid_thr:
+        found = False
+        for offset in range(1, search_radius + 1):
+            if anchor - offset >= 0 and centroidZ_np[anchor - offset] < centroid_thr:
+                anchor = anchor - offset
+                found = True
+                break
+            if anchor + offset < len(centroidZ_np) and centroidZ_np[anchor + offset] < centroid_thr:
+                anchor = anchor + offset
+                found = True
+                break
+        if found:
+            print(f"  -> gt_frame {int(gt_frame)} centroidZ={centroidZ_np[int(gt_frame)]:.3f} > {centroid_thr}, shifted to {anchor} (offset={anchor - int(gt_frame):+d}, centroidZ={centroidZ_np[anchor]:.3f})")
+        else:
+            print(f"  -> gt_frame {int(gt_frame)} centroidZ={centroidZ_np[int(gt_frame)]:.3f} > {centroid_thr}, no frame below threshold within ±{search_radius} — SKIPPED")
+            n_skipped += 1
+            continue
 
-    HVRAE_loss_history_falls                       = model.HVRAE_predict(inferencedata_falls)
-    HVRAE_loss_history_normal                       = model.HVRAE_predict(inferencedata_normal)
+    # Walk backward from anchor
+    i = anchor
+    while i >= 0 and centroidZ_np[i] < centroid_thr:
+        current_fall_indexes.add(i)
+        i -= 1
+    # Walk forward from anchor
+    i = anchor + 1
+    while i < len(centroidZ_np) and centroidZ_np[i] < centroid_thr:
+        current_fall_indexes.add(i)
+        i += 1
+    for index in current_fall_indexes:
+        gt_falls_predict_idx.add(index)
+    gt_falls_predict_idx_firsts.add(min(current_fall_indexes))
+    n_labeled += 1
 
-    HVRAE_SL_loss_history_falls                    = model.HVRAE_SL_predict(inferencedata_falls)
-    HVRAE_SL_loss_history_normal                    = model.HVRAE_SL_predict(inferencedata_normal)
+gt_falls_predict_idx = np.array(sorted(gt_falls_predict_idx))
+np.savetxt(project_path + 'data/DS2/DS2_PREDICT.csv', gt_falls_predict_idx, fmt='%d', delimiter=',')
+print(f"DS2_PREDICT: {n_labeled} falls labeled, {n_skipped} skipped, {len(gt_falls_predict_idx)} total frames")
+print(f"Saved to {project_path + 'data/DS2/DS2_PREDICT.csv'}")
 
-    RAE_loss_history_falls                        = model.RAE_predict(inferencedata_falls)
-    RAE_loss_history_normal                        = model.RAE_predict(inferencedata_normal)
-
-    HVRAE_loss_history_falls_normal = HVRAE_loss_history_falls + HVRAE_loss_history_normal
-    HVRAE_SL_loss_history_falls_normal = HVRAE_SL_loss_history_falls + HVRAE_SL_loss_history_normal
-    RAE_loss_history_falls_normal = RAE_loss_history_falls + RAE_loss_history_normal
-
-
-
+gt_falls_predict_idx_firsts = np.array(sorted(gt_falls_predict_idx_firsts))
+np.savetxt(project_path + 'data/DS2/DS2_PREDICT_FIRSTS.csv', gt_falls_predict_idx_firsts, fmt='%d', delimiter=',')
+print(f"DS2_PREDICT_FIRSTS: {n_labeled} falls labeled, {n_skipped} skipped, {len(gt_falls_predict_idx_firsts)} total frames")
+print(f"Saved to {project_path + 'data/DS2/DS2_PREDICT_FIRSTS.csv'}")
 
 
 # ----------------------------------------------------------------------------
 
 # Cell 9
-    plt.figure()
-    plt.ylim(0.0, 2.2)
-    plt.xlabel("Time in Seconds")
-    time_step = np.arange(0, len(centroidZ_history_normal))*0.1 # 0.1 seconds per frame
-    plt.plot(time_step, centroidZ_history_normal, linewidth=2, label='Centroid Height')
-    plt.plot(time_step, HVRAE_loss_history_normal, linewidth=2, label='Anomaly Level')
-    plt.legend(loc="upper right")
-    plt.title('HVRAE Results')
-    plt.savefig(inferencedata_file_normal+'_HVRAE_prediction.png')
-    plt.show()
+# --- DS2_START_FALLS: find the actual "body hits ground" frame per GT fall ---
+centroidZ_np = np.array(centroidZ_history)
+drop_window = 5  # frames to look backward/forward
+search_before = 10  # how far before GT to search
+search_after = 15   # how far after GT to search
 
-    plt.figure()
-    plt.ylim(0.0, 2.2)
-    plt.xlabel("Time in Seconds")
-    time_step = np.arange(0, len(centroidZ_history_normal))*0.1 # 0.1 seconds per frame
-    plt.plot(time_step, centroidZ_history_normal, linewidth=2, label='Centroid Height')
-    plt.plot(time_step, HVRAE_SL_loss_history_normal, linewidth=2, label='Anomaly Level')
-    plt.legend(loc="upper right")
-    plt.title('HVRAE_SL Results')
-    plt.savefig(inferencedata_file_normal+'_HVRAE_SL_prediction.png')
-    plt.show()
+gt_start_falls = []
+for gt_frame in gt_falls_idx:
+    gt_frame = int(gt_frame)
+    search_lo = max(drop_window, gt_frame - search_before)
+    search_hi = min(len(centroidZ_np) - drop_window - 1, gt_frame + search_after)
 
-    plt.figure()
-    plt.ylim(0.0, 2.2)
-    plt.xlabel("Time in Seconds")
-    time_step = np.arange(0, len(centroidZ_history_normal))*0.1 # 0.1 seconds per frame
-    plt.plot(time_step, centroidZ_history_normal, linewidth=2, label='Centroid Height')
-    plt.plot(time_step, RAE_loss_history_normal, linewidth=2, label='Anomaly Level')
-    plt.legend(loc="upper right")
-    plt.title('RAE Results')
-    plt.savefig(inferencedata_file_normal+'_RAE_prediction.png')
-    plt.show()
+    best_score = -np.inf
+    best_f = None
+    for f in range(search_lo, search_hi + 1):
+        if centroidZ_np[f] >= 0.5:
+            continue  # still upright, skip
+        backward_drop = (centroidZ_np[f - drop_window] - centroidZ_np[f]) / drop_window
+        forward_drop = (centroidZ_np[f] - centroidZ_np[f + drop_window]) / drop_window
+        score = backward_drop - abs(forward_drop)
+        if score > best_score:
+            best_score = score
+            best_f = f
+
+    if best_f is not None:
+        # Sanity: check backward frames are monotonically decreasing
+        backward_frames = [centroidZ_np[best_f - i] for i in range(drop_window, 0, -1)]
+        backward_frames.append(centroidZ_np[best_f])
+        is_monotonic = all(backward_frames[i] >= backward_frames[i+1] for i in range(len(backward_frames)-1))
+        if not is_monotonic:
+            print(f"  WARNING: GT {gt_frame} -> hit_frame {best_f}: backward centroidZ is NOT monotonically decreasing")
+            print(f"    backward centroidZ: {[f'{v:.3f}' for v in backward_frames]}")
+
+        print(f"  GT {gt_frame} -> hit_ground frame {best_f} (score={best_score:.3f}, centroidZ={centroidZ_np[best_f]:.3f})")
+        gt_start_falls.append(best_f)
+    else:
+        print(f"  WARNING: GT {gt_frame} -> no valid hit_ground frame found (all candidates above 0.5m)")
+
+gt_start_falls = np.array(sorted(gt_start_falls))
+np.savetxt(project_path + 'data/DS2/DS2_START_FALLS.csv', gt_start_falls, fmt='%d', delimiter=',')
+print(f"DS2_START_FALLS: {len(gt_start_falls)} falls, saved to data/DS2/DS2_START_FALLS.csv")
 
 # ----------------------------------------------------------------------------
 
 # Cell 10
-    plt.figure()
-    plt.ylim(0.0, 2.2)
-    plt.xlabel("Time in Seconds")
-    time_step = np.arange(0, len(centroidZ_history_falls))*0.1 # 0.1 seconds per frame
-    plt.plot(time_step, centroidZ_history_falls, linewidth=2, label='Centroid Height')
-    plt.plot(time_step, HVRAE_loss_history_falls, linewidth=2, label='Anomaly Level')
-    plt.legend(loc="upper right")
-    plt.title('HVRAE Results')
-    plt.savefig(inferencedata_file_falls+'_HVRAE_prediction.png')
-    plt.show()
+# For performace evaluation
+calculator                              = compute_metric()
+HVRAE_tpr, HVRAE_fp_total                 = calculator.cal_roc(HVRAE_loss_history, centroidZ_history, gt_falls_idx)
+HVRAE_SL_tpr, HVRAE_SL_fp_total           = calculator.cal_roc(HVRAE_SL_loss_history, centroidZ_history, gt_falls_idx)
+RAE_tpr, RAE_fp_total                   = calculator.cal_roc(RAE_loss_history, centroidZ_history, gt_falls_idx)
 
-    plt.figure()
-    plt.ylim(0.0, 2.2)
-    plt.xlabel("Time in Seconds")
-    time_step = np.arange(0, len(centroidZ_history_falls))*0.1 # 0.1 seconds per frame
-    plt.plot(time_step, centroidZ_history_falls, linewidth=2, label='Centroid Height')
-    plt.plot(time_step, HVRAE_SL_loss_history_falls, linewidth=2, label='Anomaly Level')
-    plt.legend(loc="upper right")
-    plt.title('HVRAE_SL Results')
-    plt.savefig(inferencedata_file_falls+'_HVRAE_SL_prediction.png')
-    plt.show()
 
-    plt.figure()
-    plt.ylim(0.0, 2.2)
-    plt.xlabel("Time in Seconds")
-    time_step = np.arange(0, len(centroidZ_history_falls))*0.1 # 0.1 seconds per frame
-    plt.plot(time_step, centroidZ_history_falls, linewidth=2, label='Centroid Height')
-    plt.plot(time_step, RAE_loss_history_falls, linewidth=2, label='Anomaly Level')
-    plt.legend(loc="upper right")
-    plt.title('RAE Results')
-    plt.savefig(inferencedata_file_falls+'_RAE_prediction.png')
-    plt.show()
+# Plot Receiver operating characteristic (ROC) curves
+plt.figure()
+plt.xlim(-0.1, 10)
+plt.xticks(np.arange(0, 11, 1))
+plt.ylim(0.0, 1.1)
+plt.scatter(HVRAE_fp_total, HVRAE_tpr, c='r')
+plt.plot(HVRAE_fp_total, HVRAE_tpr, c='r', linewidth=2, label='HVRAE ROC')
+plt.xlim(-0.1, 10)
+plt.xticks(np.arange(0, 11, 1))
+plt.ylim(0.0, 1.1)
+plt.scatter(HVRAE_SL_fp_total, HVRAE_SL_tpr, c='b')
+plt.plot(HVRAE_SL_fp_total, HVRAE_SL_tpr, c='b', linewidth=2, label='HVRAE_SL ROC')
+plt.xlim(-0.1, 10)
+plt.xticks(np.arange(0, 11, 1))
+plt.ylim(0.0, 1.1)
+plt.scatter(RAE_fp_total, RAE_tpr, c='g')
+plt.plot(RAE_fp_total, RAE_tpr, c='g', linewidth=2, label='RAE ROC')
+plt.legend(loc="lower right")
+plt.xlabel("Number od False Alarms")
+plt.ylabel("True Fall Detection Rate")
+plt.savefig(inferencedata_file + '_ROC.png')
+plt.show()
 
 # ----------------------------------------------------------------------------
 
 # Cell 11
+# --- Visualize each GT fall (gt_start_falls) with centroidZ and anomaly histories ---
+centroidZ_np = np.array(centroidZ_history)
 
-    plt.figure()
-    plt.ylim(0.0, 2.2)
-    plt.xlabel("Time in Seconds")
-    time_step = np.arange(0, len(centroidZ_history_falls) + len(centroidZ_history_normal))*0.1 # 0.1 seconds per frame
-    plt.plot(time_step, centroidZ_history_falls_normal, linewidth=2, label='Centroid Height')
-    plt.plot(time_step, HVRAE_loss_history_falls_normal, linewidth=2, label='Anomaly Level')
-    plt.legend(loc="upper right")
-    plt.title('HVRAE Results (falls + normal)')
-    plt.savefig(inferencedata_file_falls+'_HVRAE_prediction.png')
-    plt.show()
+print(f"Number of GT falls (gt_start_falls): {len(gt_start_falls)}")
+print(f"GT hit-ground frames: {gt_start_falls.tolist()}")
+print()
+
+for fi, gt_hit in enumerate(gt_start_falls):
+    plot_fall_window(
+        gt_frame=gt_hit,
+        centroidZ_history=centroidZ_history,
+        loss_histories={
+            "HVRAE": (HVRAE_loss_history, "r"),
+            "HVRAE_SL": (HVRAE_SL_loss_history, "b"),
+            "RAE": (RAE_loss_history, "g"),
+        },
+        gt_label="gt_start_fall",
+        title=f"GT fall {fi+1}/{len(gt_start_falls)}: hit_ground frame {int(gt_hit)} (centroidZ={centroidZ_np[int(gt_hit)]:.3f})",
+    )
 
 # ----------------------------------------------------------------------------
 
 # Cell 12
+# Early prediction evaluation on DS2
+gt_predict_frames = set(np.loadtxt(project_path + 'data/DS2/DS2_PREDICT.csv', dtype=int))
+# gt_start_falls = set(np.loadtxt(project_path + 'data/DS2/DS2_START_FALLS.csv', dtype=int))
+for gap in [1, 2, 3]:
+    calculator = compute_metric_early_predict(prediction_gap=gap)
+    HVRAE_ep_tpr, HVRAE_ep_fpr = calculator.cal_roc_anomaly(HVRAE_loss_history, centroidZ_history, gt_start_falls, gt_predict_frames)
+    HVRAE_SL_ep_tpr, HVRAE_SL_ep_fpr = calculator.cal_roc_anomaly(HVRAE_SL_loss_history, centroidZ_history, gt_start_falls, gt_predict_frames)
+    RAE_ep_tpr, RAE_ep_fpr = calculator.cal_roc_anomaly(RAE_loss_history, centroidZ_history, gt_start_falls, gt_predict_frames)
 
-    ## ---- plot the 80 to 100 frames, to try and see pattern of fall --- #
     plt.figure()
-    plt.ylim(0.0, 2.2)
-    plt.xlabel("Time in Seconds")
-    time_step = np.arange(920, 940)*0.1 # 0.1 seconds per frame
-    plt.plot(time_step, centroidZ_history_falls[910:930], linewidth=2, label='Centroid Height')
-    plt.plot(time_step, HVRAE_loss_history_falls[910:930], linewidth=2, label='Anomaly Level')
-    plt.legend(loc="upper right")
-    plt.title('HVRAE Results')
-    # plt.savefig(inferencedata_file_falls+'_HVRAE_prediction.png')
-    plt.show()
+    plt.xlim(-0.1, 31)
+    plt.xticks(np.arange(0, 32, 2))
+    plt.ylim(0.0, 1.1)
+    plt.scatter(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r')
+    plt.plot(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r', linewidth=2, label='HVRAE')
+    plt.scatter(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b')
+    plt.plot(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b', linewidth=2, label='HVRAE_SL')
+    plt.scatter(RAE_ep_fpr, RAE_ep_tpr, c='g')
+    plt.plot(RAE_ep_fpr, RAE_ep_tpr, c='g', linewidth=2, label='RAE')
+    plt.title(f'DS2 Early Predict ROC (anomaly sweep, gap={gap} frames)')
+    plt.xlabel('Number of False Alarms')
+    plt.ylabel('True Fall Detection Rate')
+    plt.legend(loc='lower right')
 
+
+    thresholds = np.arange(0.0, 10.0, 0.1)
+    plt.figure()
+    plt.xlim(0.0, 4.0)
+    plt.xticks(np.arange(0, 5, 1))
+    plt.ylim(0.0, 1.1)
+    plt.plot(thresholds, HVRAE_ep_tpr, c='r', linewidth=2, label='HVRAE')
+    plt.plot(thresholds, HVRAE_SL_ep_tpr, c='b', linewidth=2, label='HVRAE_SL')
+    plt.plot(thresholds, RAE_ep_tpr, c='g', linewidth=2, label='RAE')
+    plt.title(f'DS2 Early Predict TPR vs Anomaly Threshold (gap={gap} frames)')
+    plt.xlabel('Anomaly Threshold')
+    plt.ylabel('True Fall Detection Rate')
+    plt.legend(loc='upper right')
+
+    plt.figure()
+    plt.xlim(0.0, 4.0)
+    plt.xticks(np.arange(0, 5, 1))
+    plt.plot(thresholds, HVRAE_ep_fpr, c='r', linewidth=2, label='HVRAE')
+    plt.plot(thresholds, HVRAE_SL_ep_fpr, c='b', linewidth=2, label='HVRAE_SL')
+    plt.plot(thresholds, RAE_ep_fpr, c='g', linewidth=2, label='RAE')
+    plt.title(f'DS2 Early Predict FP Count vs Anomaly Threshold (gap={gap} frames)')
+    plt.xlabel('Anomaly Threshold')
+    plt.ylabel('Number of False Alarms')
+    plt.legend(loc='upper right')
 
 # ----------------------------------------------------------------------------
 
 # Cell 13
-    # Early prediction evaluation on DS1 — skipped (no gt_falls_predict_idx_firsts for DS1)
-    # print(f"gt_falls_idx: {gt_falls_idx}")
-    # for gap in [1, 2, 3]:
-    #     calculator = compute_metric_early_predict(prediction_gap=gap)
-    #     HVRAE_ep_tpr, HVRAE_ep_fpr = calculator.cal_roc_anomaly(HVRAE_loss_history_falls_normal, centroidZ_history_falls_normal, gt_falls_predict_idx_firsts)
-    #     HVRAE_SL_ep_tpr, HVRAE_SL_ep_fpr = calculator.cal_roc_anomaly(HVRAE_SL_loss_history_falls_normal, centroidZ_history_falls_normal, gt_falls_predict_idx_firsts)
-    #     RAE_ep_tpr, RAE_ep_fpr = calculator.cal_roc_anomaly(RAE_loss_history_falls_normal, centroidZ_history_falls_normal, gt_falls_predict_idx_firsts)
+plt.figure()
+plt.ylim(0.0, 2.2)
+plt.xlabel("Time in Seconds")
+time_step = np.arange(0, len(centroidZ_history[100:1000]))*0.1 # 0.1 seconds per frame
+plt.plot(time_step, centroidZ_history[100:1000], linewidth=2, label='Centroid Height')
+plt.plot(time_step, HVRAE_loss_history[100:1000], linewidth=2, label='Anomaly Level')
+plt.legend(loc="upper right")
+plt.title('HVRAE Results')
+plt.show()
+
+plt.figure()
+plt.ylim(0.0, 2.2)
+plt.xlabel("Time in Seconds")
+time_step = np.arange(0, len(centroidZ_history[100:1000]))*0.1 # 0.1 seconds per frame
+plt.plot(time_step, centroidZ_history[100:1000], linewidth=2, label='Centroid Height')
+plt.plot(time_step, HVRAE_SL_loss_history[100:1000], linewidth=2, label='Anomaly Level')
+plt.legend(loc="upper right")
+plt.title('HVRAE_SL Results')
+plt.show()
+
+plt.figure()
+plt.ylim(0.0, 2.2)
+plt.xlabel("Time in Seconds")
+time_step = np.arange(0, len(centroidZ_history[100:1000]))*0.1 # 0.1 seconds per frame
+plt.plot(time_step, centroidZ_history[100:1000], linewidth=2, label='Centroid Height')
+plt.plot(time_step, RAE_loss_history[100:1000], linewidth=2, label='Anomaly Level')
+plt.legend(loc="upper right")
+plt.title('RAE Results')
+plt.show()
+
+
+# Combined plot: centroidZ + all loss histories
+plt.figure(figsize=(14, 5))
+plt.ylim(0.0, 2.2)
+plt.xlabel("Time in Seconds")
+time_step = np.arange(0, len(centroidZ_history[100:1000]))*0.1
+plt.plot(time_step, centroidZ_history[100:1000], linewidth=2, label='Centroid Height', c='k')
+plt.plot(time_step, HVRAE_loss_history[100:1000], linewidth=2, label='HVRAE', c='r')
+plt.plot(time_step, HVRAE_SL_loss_history[100:1000], linewidth=2, label='HVRAE_SL', c='b')
+plt.plot(time_step, RAE_loss_history[100:1000], linewidth=2, label='RAE', c='g')
+plt.legend(loc="upper right")
+plt.title('All Models vs Centroid Height (frames 100-1000)')
+plt.show()
+top_four_HVRAE = local_maxima_top_n(HVRAE_loss_history, n=4, window=15)
+top_four_HVRAE_SL = local_maxima_top_n(HVRAE_SL_loss_history, n=4, window=15)
+top_four_RAE = local_maxima_top_n(RAE_loss_history, n=4, window=15)
+print("------------------")
+print(f"top four values HVRAE: {top_four_HVRAE}")
+print(f"top four values HVRAE_SL: {top_four_HVRAE_SL}")
+print(f"top four values RAE: {top_four_RAE}")
+print("------------------")
 
 # ----------------------------------------------------------------------------
 
 # Cell 14
-    # --- Visualize each DS1 fall with centroidZ and anomaly histories ---
-    win_len = 10  # anomaly window length
-    plot_margin = 30  # frames before/after GT to show
-    centroidZ_falls_np = np.array(centroidZ_history_falls)
+# --- Debug: GT falls missed by HVRAE but caught by HVRAE_SL ---
+# Run detection at fixed thresholds for both models, compute TP/FP/FN,
+# then find GT falls that HVRAE misses (FN) but HVRAE_SL catches (TP).
+# For each such fall, print aligned anomaly scores and plot a local view
+# of centroidZ + both models' causally-aligned anomaly around the GT frame.
+debug_threshold = 0.7
+debug_centroidZ_thr = 0.6
+debug_calculator = compute_metric_early_predict(prediction_gap=1, lower_bound=5)
 
-    gt_falls_idx_sorted = sorted(gt_falls_idx)
-    print(f"Number of DS1 falls: {len(gt_falls_idx_sorted)}")
-    print(f"Fall frames: {gt_falls_idx_sorted}")
-    print()
+hvrae_detected, _ = debug_calculator.detect_falls(HVRAE_loss_history, centroidZ_history, debug_threshold, debug_centroidZ_thr)
+hvrae_sl_detected, _ = debug_calculator.detect_falls(HVRAE_SL_loss_history, centroidZ_history, debug_threshold, debug_centroidZ_thr)
 
-    for fi, gt_hit in enumerate(gt_falls_idx_sorted):
-        gt_hit = int(gt_hit)
-        plot_lo = max(0, gt_hit - plot_margin)
-        plot_hi = min(len(centroidZ_history_falls), gt_hit + plot_margin + 1)
-        frames = np.arange(plot_lo, plot_hi)
+hvrae_tp, hvrae_fp, hvrae_fn = debug_calculator.find_tpfpfn(hvrae_detected, gt_start_falls, gt_predict_frames)
+hvrae_sl_tp, hvrae_sl_fp, hvrae_sl_fn = debug_calculator.find_tpfpfn(hvrae_sl_detected, gt_start_falls, gt_predict_frames)
 
-        # Aligned anomaly: loss_history[j] covers frames [j, j+win_len-1],
-        # so the anomaly "ending" at frame i is loss_history[i - (win_len-1)].
-        anom_lo = max(0, plot_lo - (win_len - 1))
-        anom_hi = min(len(HVRAE_loss_history_falls), plot_hi - (win_len - 1))
-        anom_frames = np.arange(anom_lo + (win_len - 1), anom_hi + (win_len - 1))
+print(f"HVRAE:    TP={len(hvrae_tp)}, FP={len(hvrae_fp)}, FN={len(hvrae_fn)}")
+print(f"HVRAE_SL: TP={len(hvrae_sl_tp)}, FP={len(hvrae_sl_fp)}, FN={len(hvrae_sl_fn)}")
 
-        fig, ax1 = plt.subplots(figsize=(12, 4))
-        ax1.set_xlabel("Frame")
-        ax1.set_ylabel("Centroid Z (m)", color="k")
-        ax1.plot(frames, centroidZ_history_falls[plot_lo:plot_hi], "k-", linewidth=2, label="centroidZ")
-        ax1.tick_params(axis="y", labelcolor="k")
+# GT falls missed by HVRAE but caught by HVRAE_SL
+hvrae_fn_set = set(hvrae_fn)
+hvrae_sl_tp_gt_firsts = set(gt_start_falls[i] for i in hvrae_sl_tp)
+missed_by_hvrae_caught_by_sl = sorted(hvrae_fn_set & hvrae_sl_tp_gt_firsts)
 
-        ax2 = ax1.twinx()
-        ax2.set_ylabel("Anomaly Score (aligned)", color="gray")
-        ax2.plot(anom_frames, HVRAE_loss_history_falls[anom_lo:anom_hi], "r-", linewidth=1.5, label="HVRAE")
-        ax2.plot(anom_frames, HVRAE_SL_loss_history_falls[anom_lo:anom_hi], "b-", linewidth=1.5, label="HVRAE_SL")
-        ax2.plot(anom_frames, RAE_loss_history_falls[anom_lo:anom_hi], "g-", linewidth=1.5, label="RAE")
-        ax2.tick_params(axis="y", labelcolor="gray")
+print(f"\nGT falls missed by HVRAE but caught by HVRAE_SL: {len(missed_by_hvrae_caught_by_sl)}")
+print(f"Frame indices: {missed_by_hvrae_caught_by_sl}")
 
-        ax1.axvline(x=gt_hit, color="orange", linestyle="--", linewidth=2, label=f"fall_frame={gt_hit}")
+for gt_first in missed_by_hvrae_caught_by_sl:
+    # Print debug info
+    z_at_gt = centroidZ_history[gt_first]
+    win_start = max(0, gt_first - 9)
+    z_drop = centroidZ_history[win_start] - centroidZ_history[gt_first]
+    print(f"\n--- GT fall at frame {gt_first} ---")
+    print(f"  centroidZ at gt_first: {z_at_gt:.3f}")
+    print(f"  centroidZ drop (10-frame window): {z_drop:.3f}")
 
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize="small")
-        plt.title(f"DS1 fall {fi+1}/{len(gt_falls_idx_sorted)}: frame {gt_hit} (centroidZ={centroidZ_falls_np[gt_hit]:.3f})")
-        plt.tight_layout()
-        plt.show()
+    # Aligned anomaly: for frame i, the causal anomaly is loss_history[i - (win_len-1)]
+    # Show anomaly values for frames [gt_first - 15, gt_first + 15], aligned
+    win_len = 10
+    anom_lo = max(0, gt_first - 15 - (win_len - 1))
+    anom_hi = min(len(HVRAE_loss_history), gt_first + 16 - (win_len - 1))
+    frame_lo = anom_lo + (win_len - 1)
+    frame_hi = anom_hi + (win_len - 1)
+    frames_range = list(range(frame_lo, frame_hi))
+    gt_offset = gt_first - frame_lo  # position of gt_first in the printed list
+    # Build pointer line: spaces for each entry, arrow under gt_first
+    pointer_parts = []
+    for idx, f_idx in enumerate(frames_range):
+        entry_str = f'{HVRAE_loss_history[anom_lo + idx]:.2f}'
+        if f_idx == gt_first:
+            pointer_parts.append('^GT'.center(len(entry_str) + 4))
+        else:
+            pointer_parts.append(' ' * (len(entry_str) + 4))
+    pointer_line = ''.join(pointer_parts)
+    print(f"  HVRAE    anomaly (aligned, frames {frame_lo}-{frame_hi-1}): {[f'{v:.2f}' for v in HVRAE_loss_history[anom_lo:anom_hi]]}")
+    print(f"  HVRAE_SL anomaly (aligned, frames {frame_lo}-{frame_hi-1}): {[f'{v:.2f}' for v in HVRAE_SL_loss_history[anom_lo:anom_hi]]}")
+    print(f"  frame indices:                          {frames_range}")
+    print(f"                                          {pointer_line}")
+
+    # Plot local view
+    plot_fall_window(
+        gt_frame=gt_first,
+        centroidZ_history=centroidZ_history,
+        loss_histories={
+            "HVRAE (aligned)": (HVRAE_loss_history, "r"),
+            "HVRAE_SL (aligned)": (HVRAE_SL_loss_history, "b"),
+        },
+        gt_label="GT first",
+        threshold_line=debug_threshold,
+        title=f"GT fall at frame {gt_first}: missed by HVRAE, caught by HVRAE_SL",
+    )
 
 # ----------------------------------------------------------------------------
 
 # Cell 15
-    # Load inference dataset and the ground truth timesheet
-    inferencedata_file                      = project_path + 'data/DS2/DS2'
-    inferencedata, centroidZ_history        = data_preproc().load_bin(inferencedata_file + '.npy', fortrain=False)
-    # Ground truth time index file exists
-    if os.path.exists(inferencedata_file + '.csv'):
-        gt_falls_idx                        = np.genfromtxt(inferencedata_file + '.csv', delimiter=',').astype(int)
-    # Maybe this file doesn't contain any falls
-    else:
-        gt_falls_idx                        = []
+# --- Debug: HVRAE false positives not present in HVRAE_SL ---
+# Re-cluster detections to get actual frame indices per cluster
+hvrae_clusters = cluster_detections(hvrae_detected)
+hvrae_sl_clusters = cluster_detections(hvrae_sl_detected)
 
-    # Load the models
-    model                                   = autoencoder_mdl(model_dir = project_path + 'saved_model/')
-    HVRAE_loss_history                       = model.HVRAE_predict(inferencedata)
-    HVRAE_SL_loss_history                    = model.HVRAE_SL_predict(inferencedata)
-    RAE_loss_history                        = model.RAE_predict(inferencedata)
+# Get FP cluster indices from find_tpfpfn results
+# hvrae_fp = cluster indices that are FP
+hvrae_fp_clusters = [hvrae_clusters[i] for i in hvrae_fp]
+hvrae_sl_fp_clusters = [hvrae_sl_clusters[i] for i in hvrae_sl_fp]
 
+# For each HVRAE FP cluster, check if HVRAE_SL has a cluster overlapping the same region
+# Use the first detection in each cluster as a representative frame
+hvrae_only_fp = [c for c in hvrae_fp_clusters if not cluster_overlaps(c, hvrae_sl_fp_clusters)]
 
+print(f"HVRAE FP clusters: {len(hvrae_fp_clusters)}")
+print(f"HVRAE FP clusters NOT in HVRAE_SL: {len(hvrae_only_fp)}")
+
+win_len = 10
+for ci, cluster in enumerate(hvrae_only_fp):
+    rep_frame = cluster[0]  # first detection in cluster
+    print(f"\n--- HVRAE-only FP cluster {ci}, detections at frames {cluster} ---")
+    print(f"  centroidZ at first det: {centroidZ_history[rep_frame]:.3f}")
+
+    # Aligned anomaly prints: for frame i, anomaly = loss_history[i - (win_len-1)]
+    print_lo = max(0, rep_frame - 15 - (win_len - 1))
+    print_hi = min(len(HVRAE_loss_history), rep_frame + 16 - (win_len - 1))
+    print_frame_lo = print_lo + (win_len - 1)
+    print_frame_hi = print_hi + (win_len - 1)
+    frames_range = list(range(print_frame_lo, print_frame_hi))
+    pointer_parts = []
+    for f_idx in frames_range:
+        if f_idx == rep_frame:
+            pointer_parts.append(' ^DET '.center(8))
+        else:
+            pointer_parts.append(' ' * 8)
+    print(f"  HVRAE    anomaly (aligned, frames {print_frame_lo}-{print_frame_hi-1}): {[f'{v:.2f}' for v in HVRAE_loss_history[print_lo:print_hi]]}")
+    print(f"  HVRAE_SL anomaly (aligned, frames {print_frame_lo}-{print_frame_hi-1}): {[f'{v:.2f}' for v in HVRAE_SL_loss_history[print_lo:print_hi]]}")
+    print(f"  frame indices: {frames_range}")
+    print(f"                 {''.join(pointer_parts)}")
+
+    # Plot
+    plot_fall_window(
+        gt_frame=rep_frame,
+        centroidZ_history=centroidZ_history,
+        loss_histories={
+            "HVRAE (aligned)": (HVRAE_loss_history, "r"),
+            "HVRAE_SL (aligned)": (HVRAE_SL_loss_history, "b"),
+        },
+        gt_label="first det",
+        threshold_line=debug_threshold,
+        title=f"HVRAE-only FP cluster {ci} (first det at frame {rep_frame})",
+    )
 
 # ----------------------------------------------------------------------------
 
 # Cell 16
-
-    # Create DS2_PREDICT: expand each GT fall to all adjacent frames with centroidZ < threshold
-    centroid_thr = 0.6
-    search_radius = 10
-    gt_falls_predict_idx = set()
-    gt_falls_predict_idx_firsts = set()
-    centroidZ_np = np.array(centroidZ_history)
-    n_labeled = 0
-    n_skipped = 0
-
-    for gt_frame in gt_falls_idx:
-        current_fall_indexes = set()
-        anchor = int(gt_frame)
-        # print(f"frame index: {gt_frame}, centroid height: {centroidZ_np[anchor]:.3g}")
-        print(f"gt_frame index: {anchor}")
-        # If the GT frame itself isn't below threshold, search nearby for the closest one
-        if centroidZ_np[anchor] > centroid_thr:
-            found = False
-            for offset in range(1, search_radius + 1):
-                if anchor - offset >= 0 and centroidZ_np[anchor - offset] < centroid_thr:
-                    anchor = anchor - offset
-                    found = True
-                    break
-                if anchor + offset < len(centroidZ_np) and centroidZ_np[anchor + offset] < centroid_thr:
-                    anchor = anchor + offset
-                    found = True
-                    break
-            if found:
-                print(f"  -> gt_frame {int(gt_frame)} centroidZ={centroidZ_np[int(gt_frame)]:.3f} > {centroid_thr}, shifted to {anchor} (offset={anchor - int(gt_frame):+d}, centroidZ={centroidZ_np[anchor]:.3f})")
-            else:
-                print(f"  -> gt_frame {int(gt_frame)} centroidZ={centroidZ_np[int(gt_frame)]:.3f} > {centroid_thr}, no frame below threshold within ±{search_radius} — SKIPPED")
-                n_skipped += 1
-                continue
-
-        # Walk backward from anchor
-        i = anchor
-        while i >= 0 and centroidZ_np[i] < centroid_thr:
-            current_fall_indexes.add(i)
-            i -= 1
-        # Walk forward from anchor
-        i = anchor + 1
-        while i < len(centroidZ_np) and centroidZ_np[i] < centroid_thr:
-            current_fall_indexes.add(i)
-            i += 1
-        for index in current_fall_indexes:
-            gt_falls_predict_idx.add(index)
-        gt_falls_predict_idx_firsts.add(min(current_fall_indexes))
-        n_labeled += 1
-
-    gt_falls_predict_idx = np.array(sorted(gt_falls_predict_idx))
-    np.savetxt(project_path + 'data/DS2/DS2_PREDICT.csv', gt_falls_predict_idx, fmt='%d', delimiter=',')
-    print(f"DS2_PREDICT: {n_labeled} falls labeled, {n_skipped} skipped, {len(gt_falls_predict_idx)} total frames")
-    print(f"Saved to {project_path + 'data/DS2/DS2_PREDICT.csv'}")
-
-    gt_falls_predict_idx_firsts = np.array(sorted(gt_falls_predict_idx_firsts))
-    np.savetxt(project_path + 'data/DS2/DS2_PREDICT_FIRSTS.csv', gt_falls_predict_idx_firsts, fmt='%d', delimiter=',')
-    print(f"DS2_PREDICT_FIRSTS: {n_labeled} falls labeled, {n_skipped} skipped, {len(gt_falls_predict_idx_firsts)} total frames")
-    print(f"Saved to {project_path + 'data/DS2/DS2_PREDICT_FIRSTS.csv'}")
-
-
-# ----------------------------------------------------------------------------
-
-# Cell 17
-
-    # --- DS2_START_FALLS: find the actual "body hits ground" frame per GT fall ---
-    centroidZ_np = np.array(centroidZ_history)
-    drop_window = 5  # frames to look backward/forward
-    search_before = 10  # how far before GT to search
-    search_after = 15   # how far after GT to search
-
-    gt_start_falls = []
-    for gt_frame in gt_falls_idx:
-        gt_frame = int(gt_frame)
-        search_lo = max(drop_window, gt_frame - search_before)
-        search_hi = min(len(centroidZ_np) - drop_window - 1, gt_frame + search_after)
-
-        best_score = -np.inf
-        best_f = None
-        for f in range(search_lo, search_hi + 1):
-            if centroidZ_np[f] >= 0.5:
-                continue  # still upright, skip
-            backward_drop = (centroidZ_np[f - drop_window] - centroidZ_np[f]) / drop_window
-            forward_drop = (centroidZ_np[f] - centroidZ_np[f + drop_window]) / drop_window
-            score = backward_drop - abs(forward_drop)
-            if score > best_score:
-                best_score = score
-                best_f = f
-
-        if best_f is not None:
-            # Sanity: check backward frames are monotonically decreasing
-            backward_frames = [centroidZ_np[best_f - i] for i in range(drop_window, 0, -1)]
-            backward_frames.append(centroidZ_np[best_f])
-            is_monotonic = all(backward_frames[i] >= backward_frames[i+1] for i in range(len(backward_frames)-1))
-            if not is_monotonic:
-                print(f"  WARNING: GT {gt_frame} -> hit_frame {best_f}: backward centroidZ is NOT monotonically decreasing")
-                print(f"    backward centroidZ: {[f'{v:.3f}' for v in backward_frames]}")
-
-            print(f"  GT {gt_frame} -> hit_ground frame {best_f} (score={best_score:.3f}, centroidZ={centroidZ_np[best_f]:.3f})")
-            gt_start_falls.append(best_f)
-        else:
-            print(f"  WARNING: GT {gt_frame} -> no valid hit_ground frame found (all candidates above 0.5m)")
-
-    gt_start_falls = np.array(sorted(gt_start_falls))
-    np.savetxt(project_path + 'data/DS2/DS2_START_FALLS.csv', gt_start_falls, fmt='%d', delimiter=',')
-    print(f"DS2_START_FALLS: {len(gt_start_falls)} falls, saved to data/DS2/DS2_START_FALLS.csv")
-
-# ----------------------------------------------------------------------------
-
-# Cell 18
-
-    # For performace evaluation
-    calculator                              = compute_metric()
-    HVRAE_tpr, HVRAE_fp_total                 = calculator.cal_roc(HVRAE_loss_history, centroidZ_history, gt_falls_idx)
-    HVRAE_SL_tpr, HVRAE_SL_fp_total           = calculator.cal_roc(HVRAE_SL_loss_history, centroidZ_history, gt_falls_idx)
-    RAE_tpr, RAE_fp_total                   = calculator.cal_roc(RAE_loss_history, centroidZ_history, gt_falls_idx)
-
-# ----------------------------------------------------------------------------
-
-# Cell 19
-    # --- Visualize each GT fall (gt_start_falls) with centroidZ and anomaly histories ---
-    win_len = 10  # anomaly window length
-    plot_margin = 30  # frames before/after GT to show
-
-    print(f"Number of GT falls (gt_start_falls): {len(gt_start_falls)}")
-    print(f"GT hit-ground frames: {gt_start_falls.tolist()}")
-    print()
-
-    for fi, gt_hit in enumerate(gt_start_falls):
-        gt_hit = int(gt_hit)
-        plot_lo = max(0, gt_hit - plot_margin)
-        plot_hi = min(len(centroidZ_history), gt_hit + plot_margin + 1)
-        frames = np.arange(plot_lo, plot_hi)
-
-        # Aligned anomaly: loss_history[j] covers frames [j, j+win_len-1],
-        # so the anomaly "ending" at frame i is loss_history[i - (win_len-1)].
-        anom_lo = max(0, plot_lo - (win_len - 1))
-        anom_hi = min(len(HVRAE_loss_history), plot_hi - (win_len - 1))
-        anom_frames = np.arange(anom_lo + (win_len - 1), anom_hi + (win_len - 1))
-
-        fig, ax1 = plt.subplots(figsize=(12, 4))
-        ax1.set_xlabel("Frame")
-        ax1.set_ylabel("Centroid Z (m)", color="k")
-        ax1.plot(frames, centroidZ_history[plot_lo:plot_hi], "k-", linewidth=2, label="centroidZ")
-        ax1.tick_params(axis="y", labelcolor="k")
-
-        ax2 = ax1.twinx()
-        ax2.set_ylabel("Anomaly Score (aligned)", color="gray")
-        ax2.plot(anom_frames, HVRAE_loss_history[anom_lo:anom_hi], "r-", linewidth=1.5, label="HVRAE")
-        ax2.plot(anom_frames, HVRAE_SL_loss_history[anom_lo:anom_hi], "b-", linewidth=1.5, label="HVRAE_SL")
-        ax2.plot(anom_frames, RAE_loss_history[anom_lo:anom_hi], "g-", linewidth=1.5, label="RAE")
-        ax2.tick_params(axis="y", labelcolor="gray")
-
-        ax1.axvline(x=gt_hit, color="orange", linestyle="--", linewidth=2, label=f"gt_start_fall={gt_hit}")
-
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper left", fontsize="small")
-        plt.title(f"GT fall {fi+1}/{len(gt_start_falls)}: hit_ground frame {gt_hit} (centroidZ={centroidZ_np[gt_hit]:.3f})")
-        plt.tight_layout()
-        plt.show()
-
-# ----------------------------------------------------------------------------
-
-# Cell 20
-
-    # Plot Receiver operating characteristic (ROC) curves
-    plt.figure()
-    plt.xlim(-0.1, 10)
-    plt.xticks(np.arange(0, 11, 1))
-    plt.ylim(0.0, 1.1)
-    plt.scatter(HVRAE_fp_total, HVRAE_tpr, c='r')
-    plt.plot(HVRAE_fp_total, HVRAE_tpr, c='r', linewidth=2, label='HVRAE ROC')
-    plt.xlim(-0.1, 10)
-    plt.xticks(np.arange(0, 11, 1))
-    plt.ylim(0.0, 1.1)
-    plt.scatter(HVRAE_SL_fp_total, HVRAE_SL_tpr, c='b')
-    plt.plot(HVRAE_SL_fp_total, HVRAE_SL_tpr, c='b', linewidth=2, label='HVRAE_SL ROC')
-    plt.xlim(-0.1, 10)
-    plt.xticks(np.arange(0, 11, 1))
-    plt.ylim(0.0, 1.1)
-    plt.scatter(RAE_fp_total, RAE_tpr, c='g')
-    plt.plot(RAE_fp_total, RAE_tpr, c='g', linewidth=2, label='RAE ROC')
-    plt.legend(loc="lower right")
-    plt.xlabel("Number od False Alarms")
-    plt.ylabel("True Fall Detection Rate")
-    plt.savefig(inferencedata_file + '_ROC.png')
-    plt.show()
-
-    # plt.figure()
-    # plt.xlim(-0.1,10)
-    # plt.xticks(np.arange(0,11,1))
-    # plt.ylim(0.0,1.1)
-    # plt.scatter(HVRAE_fp_total_predict_anomaly, HVRAE_tpr_predict_anomaly, c='r')
-    # plt.plot(HVRAE_fp_total_predict_anomaly, HVRAE_tpr_predict_anomaly, c='r', linewidth=2, label='HVRAE ROC (predict anomly)')
-    # plt.xlim(-0.1,10)
-    # plt.xticks(np.arange(0,11,1))
-    # plt.ylim(0.0,1.1)
-    # plt.scatter(HVRAE_fp_total_predict_centroid, HVRAE_tpr_predict_centroid, c='r')
-    # plt.plot(HVRAE_fp_total_predict_centroid, HVRAE_tpr_predict_centroid, c='r', linewidth=2, label='HVRAE ROC (predict centroid)')
-
-
-
-# ----------------------------------------------------------------------------
-
-# Cell 21
-    # Early prediction evaluation on DS2
-    gt_predict_frames = set(np.loadtxt(project_path + 'data/DS2/DS2_PREDICT.csv', dtype=int))
-    for gap in [1, 2, 3]:
-        calculator = compute_metric_early_predict(prediction_gap=gap)
-        HVRAE_ep_tpr, HVRAE_ep_fpr = calculator.cal_roc_anomaly(HVRAE_loss_history, centroidZ_history, gt_start_falls, gt_predict_frames)
-        HVRAE_SL_ep_tpr, HVRAE_SL_ep_fpr = calculator.cal_roc_anomaly(HVRAE_SL_loss_history, centroidZ_history, gt_start_falls, gt_predict_frames)
-        RAE_ep_tpr, RAE_ep_fpr = calculator.cal_roc_anomaly(RAE_loss_history, centroidZ_history, gt_start_falls, gt_predict_frames)
-
-        # plt.figure()
-        # plt.xlim(-0.1, 31)
-        # plt.xticks(np.arange(0, 32, 2))
-        # plt.ylim(0.0, 1.1)
-        # plt.scatter(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r')
-        # plt.plot(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r', linewidth=2, label='HVRAE')
-        # plt.scatter(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b')
-        # plt.plot(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b', linewidth=2, label='HVRAE_SL')
-        # plt.scatter(RAE_ep_fpr, RAE_ep_tpr, c='g')
-        # plt.plot(RAE_ep_fpr, RAE_ep_tpr, c='g', linewidth=2, label='RAE')
-        # plt.title(f'DS2 Early Predict ROC (anomaly sweep, gap={gap} frames)')
-        # plt.xlabel('Number of False Alarms')
-        # plt.ylabel('True Fall Detection Rate')
-        # plt.legend(loc='lower right')
-        # plt.show()
-        plt.figure()
-        plt.xlim(-0.1, 31)
-        plt.xticks(np.arange(0, 32, 2))
-        plt.ylim(0.0, 1.1)
-        plt.scatter(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r')
-        plt.plot(HVRAE_ep_fpr, HVRAE_ep_tpr, c='r', linewidth=2, label='HVRAE')
-        plt.scatter(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b')
-        plt.plot(HVRAE_SL_ep_fpr, HVRAE_SL_ep_tpr, c='b', linewidth=2, label='HVRAE_SL')
-        plt.scatter(RAE_ep_fpr, RAE_ep_tpr, c='g')
-        plt.plot(RAE_ep_fpr, RAE_ep_tpr, c='g', linewidth=2, label='RAE')
-        plt.title(f'DS2 Early Predict ROC (anomaly sweep, gap={gap} frames)')
-        plt.xlabel('Number of False Alarms')
-        plt.ylabel('True Fall Detection Rate')
-        plt.legend(loc='lower right')
-
-        # TP count vs FP count
-        n_gt_falls = len(gt_start_falls)
-        plt.figure()
-        plt.xlim(-0.1, 31)
-        plt.xticks(np.arange(0, 32, 2))
-        plt.ylim(0, n_gt_falls + 1)
-        plt.scatter(HVRAE_ep_fpr, [t * n_gt_falls for t in HVRAE_ep_tpr], c='r')
-        plt.plot(HVRAE_ep_fpr, [t * n_gt_falls for t in HVRAE_ep_tpr], c='r', linewidth=2, label='HVRAE')
-        plt.scatter(HVRAE_SL_ep_fpr, [t * n_gt_falls for t in HVRAE_SL_ep_tpr], c='b')
-        plt.plot(HVRAE_SL_ep_fpr, [t * n_gt_falls for t in HVRAE_SL_ep_tpr], c='b', linewidth=2, label='HVRAE_SL')
-        plt.scatter(RAE_ep_fpr, [t * n_gt_falls for t in RAE_ep_tpr], c='g')
-        plt.plot(RAE_ep_fpr, [t * n_gt_falls for t in RAE_ep_tpr], c='g', linewidth=2, label='RAE')
-        plt.title(f'DS2 Early Predict TP vs FP (anomaly sweep, gap={gap} frames)')
-        plt.xlabel('Number of False Alarms')
-        plt.ylabel('Number of True Positives')
-        plt.legend(loc='lower right')
-
-        # TPR vs anomaly threshold
-        thresholds = np.arange(0.0, 10.0, 0.1)
-        plt.figure()
-        plt.xlim(0.0, 4.0)
-        plt.xticks(np.arange(0, 5, 1))
-        plt.ylim(0.0, 1.1)
-        plt.plot(thresholds, HVRAE_ep_tpr, c='r', linewidth=2, label='HVRAE')
-        plt.plot(thresholds, HVRAE_SL_ep_tpr, c='b', linewidth=2, label='HVRAE_SL')
-        plt.plot(thresholds, RAE_ep_tpr, c='g', linewidth=2, label='RAE')
-        plt.title(f'DS2 Early Predict TPR vs Anomaly Threshold (gap={gap} frames)')
-        plt.xlabel('Anomaly Threshold')
-        plt.ylabel('True Fall Detection Rate')
-        plt.legend(loc='upper right')
-
-        # FP count vs anomaly threshold
-        plt.figure()
-        plt.xlim(0.0, 4.0)
-        plt.xticks(np.arange(0, 5, 1))
-        plt.plot(thresholds, HVRAE_ep_fpr, c='r', linewidth=2, label='HVRAE')
-        plt.plot(thresholds, HVRAE_SL_ep_fpr, c='b', linewidth=2, label='HVRAE_SL')
-        plt.plot(thresholds, RAE_ep_fpr, c='g', linewidth=2, label='RAE')
-        plt.title(f'DS2 Early Predict FP Count vs Anomaly Threshold (gap={gap} frames)')
-        plt.xlabel('Anomaly Threshold')
-        plt.ylabel('Number of False Alarms')
-        plt.legend(loc='upper right')
-
-# ----------------------------------------------------------------------------
-
-# Cell 22
-    plt.figure()
-    plt.ylim(0.0, 2.2)
-    plt.xlabel("Time in Seconds")
-    time_step = np.arange(0, len(centroidZ_history[100:1000]))*0.1 # 0.1 seconds per frame
-    plt.plot(time_step, centroidZ_history[100:1000], linewidth=2, label='Centroid Height')
-    plt.plot(time_step, HVRAE_loss_history[100:1000], linewidth=2, label='Anomaly Level')
-    plt.legend(loc="upper right")
-    plt.title('HVRAE Results')
-    plt.show()
-
-    plt.figure()
-    plt.ylim(0.0, 2.2)
-    plt.xlabel("Time in Seconds")
-    time_step = np.arange(0, len(centroidZ_history[100:1000]))*0.1 # 0.1 seconds per frame
-    plt.plot(time_step, centroidZ_history[100:1000], linewidth=2, label='Centroid Height')
-    plt.plot(time_step, HVRAE_SL_loss_history[100:1000], linewidth=2, label='Anomaly Level')
-    plt.legend(loc="upper right")
-    plt.title('HVRAE_SL Results')
-    plt.show()
-
-    plt.figure()
-    plt.ylim(0.0, 2.2)
-    plt.xlabel("Time in Seconds")
-    time_step = np.arange(0, len(centroidZ_history[100:1000]))*0.1 # 0.1 seconds per frame
-    plt.plot(time_step, centroidZ_history[100:1000], linewidth=2, label='Centroid Height')
-    plt.plot(time_step, RAE_loss_history[100:1000], linewidth=2, label='Anomaly Level')
-    plt.legend(loc="upper right")
-    plt.title('RAE Results')
-    plt.show()
-
-
-    # Combined plot: centroidZ + all loss histories
-    plt.figure(figsize=(14, 5))
-    plt.ylim(0.0, 2.2)
-    plt.xlabel("Time in Seconds")
-    time_step = np.arange(0, len(centroidZ_history[100:1000]))*0.1
-    plt.plot(time_step, centroidZ_history[100:1000], linewidth=2, label='Centroid Height', c='k')
-    plt.plot(time_step, HVRAE_loss_history[100:1000], linewidth=2, label='HVRAE', c='r')
-    plt.plot(time_step, HVRAE_SL_loss_history[100:1000], linewidth=2, label='HVRAE_SL', c='b')
-    plt.plot(time_step, RAE_loss_history[100:1000], linewidth=2, label='RAE', c='g')
-    plt.legend(loc="upper right")
-    plt.title('All Models vs Centroid Height (frames 100-1000)')
-    plt.show()
-    def local_maxima_top_n(numbers, n=4, window=15):
-        candidates = []
-
-        for i, val in enumerate(numbers):
-            lo = max(0, i - window)
-            hi = min(len(numbers), i + window + 1)
-            if val == max(numbers[lo:hi]):
-                candidates.append((val, i))
-
-        # Sort by value descending, take top n
-        candidates.sort(reverse=True)
-        return candidates[:n]
-
-    top_four_HVRAE = local_maxima_top_n(HVRAE_loss_history, n=4, window=15)
-    top_four_HVRAE_SL = local_maxima_top_n(HVRAE_SL_loss_history, n=4, window=15)
-    top_four_RAE = local_maxima_top_n(RAE_loss_history, n=4, window=15)
-    print("------------------")
-    print(f"top four values HVRAE: {top_four_HVRAE}")
-    print(f"top four values HVRAE_SL: {top_four_HVRAE_SL}")
-    print(f"top four values RAE: {top_four_RAE}")
-    print("------------------")
-    # --- Debug: GT falls missed by HVRAE but caught by HVRAE_SL ---
-    # Run detection at fixed thresholds for both models, compute TP/FP/FN,
-    # then find GT falls that HVRAE misses (FN) but HVRAE_SL catches (TP).
-    # For each such fall, print aligned anomaly scores and plot a local view
-    # of centroidZ + both models' causally-aligned anomaly around the GT frame.
-    debug_threshold = 0.7
-    debug_centroidZ_thr = 0.6
-    debug_calculator = compute_metric_early_predict(prediction_gap=1, lower_bound=5)
-
-    hvrae_detected, _ = debug_calculator.detect_falls(HVRAE_loss_history, centroidZ_history, debug_threshold, debug_centroidZ_thr)
-    hvrae_sl_detected, _ = debug_calculator.detect_falls(HVRAE_SL_loss_history, centroidZ_history, debug_threshold, debug_centroidZ_thr)
-
-    hvrae_tp, hvrae_fp, hvrae_fn = debug_calculator.find_tpfpfn(hvrae_detected, gt_start_falls, gt_predict_frames)
-    hvrae_sl_tp, hvrae_sl_fp, hvrae_sl_fn = debug_calculator.find_tpfpfn(hvrae_sl_detected, gt_start_falls, gt_predict_frames)
-
-    print(f"HVRAE:    TP={len(hvrae_tp)}, FP={len(hvrae_fp)}, FN={len(hvrae_fn)}")
-    print(f"HVRAE_SL: TP={len(hvrae_sl_tp)}, FP={len(hvrae_sl_fp)}, FN={len(hvrae_sl_fn)}")
-
-    # GT falls missed by HVRAE but caught by HVRAE_SL
-    hvrae_fn_set = set(hvrae_fn)
-    hvrae_sl_tp_gt_firsts = set(gt_start_falls[i] for i in hvrae_sl_tp)
-    missed_by_hvrae_caught_by_sl = sorted(hvrae_fn_set & hvrae_sl_tp_gt_firsts)
-
-    print(f"\nGT falls missed by HVRAE but caught by HVRAE_SL: {len(missed_by_hvrae_caught_by_sl)}")
-    print(f"Frame indices: {missed_by_hvrae_caught_by_sl}")
-
-    for gt_first in missed_by_hvrae_caught_by_sl:
-        # Print debug info
-        z_at_gt = centroidZ_history[gt_first]
-        win_start = max(0, gt_first - 9)
-        z_drop = centroidZ_history[win_start] - centroidZ_history[gt_first]
-        print(f"\n--- GT fall at frame {gt_first} ---")
-        print(f"  centroidZ at gt_first: {z_at_gt:.3f}")
-        print(f"  centroidZ drop (10-frame window): {z_drop:.3f}")
-
-        # Aligned anomaly: for frame i, the causal anomaly is loss_history[i - (win_len-1)]
-        # Show anomaly values for frames [gt_first - 15, gt_first + 15], aligned
-        win_len = 10
-        anom_lo = max(0, gt_first - 15 - (win_len - 1))
-        anom_hi = min(len(HVRAE_loss_history), gt_first + 16 - (win_len - 1))
-        frame_lo = anom_lo + (win_len - 1)
-        frame_hi = anom_hi + (win_len - 1)
-        frames_range = list(range(frame_lo, frame_hi))
-        gt_offset = gt_first - frame_lo  # position of gt_first in the printed list
-        # Build pointer line: spaces for each entry, arrow under gt_first
-        pointer_parts = []
-        for idx, f_idx in enumerate(frames_range):
-            entry_str = f'{HVRAE_loss_history[anom_lo + idx]:.2f}'
-            if f_idx == gt_first:
-                pointer_parts.append('^GT'.center(len(entry_str) + 4))
-            else:
-                pointer_parts.append(' ' * (len(entry_str) + 4))
-        pointer_line = ''.join(pointer_parts)
-        print(f"  HVRAE    anomaly (aligned, frames {frame_lo}-{frame_hi-1}): {[f'{v:.2f}' for v in HVRAE_loss_history[anom_lo:anom_hi]]}")
-        print(f"  HVRAE_SL anomaly (aligned, frames {frame_lo}-{frame_hi-1}): {[f'{v:.2f}' for v in HVRAE_SL_loss_history[anom_lo:anom_hi]]}")
-        print(f"  frame indices:                          {frames_range}")
-        print(f"                                          {pointer_line}")
-
-        # Plot local view
-        # Align anomaly causally: loss_history[j] covers frames [j, j+9],
-        # so the anomaly ending at frame i is loss_history[i - (win_len-1)].
-        # We shift anomaly by win_len-1=9 so it aligns with centroidZ at the same x.
-        win_len = 10
-        plot_lo = max(0, gt_first - 30)
-        plot_hi = min(len(HVRAE_loss_history), gt_first + 31)
-        frames = np.arange(plot_lo, plot_hi)
-        # Shifted anomaly indices: for frame i, plot loss_history[i - (win_len-1)]
-        anom_lo = plot_lo - (win_len - 1)
-        anom_hi = plot_hi - (win_len - 1)
-        anom_lo_clamped = max(0, anom_lo)
-        anom_hi_clamped = min(len(HVRAE_loss_history), anom_hi)
-        # The frames where we have valid shifted anomaly
-        anom_frames = np.arange(anom_lo_clamped + (win_len - 1), anom_hi_clamped + (win_len - 1))
-
-        fig, ax1 = plt.subplots(figsize=(12, 4))
-        ax1.set_xlabel('Frame')
-        ax1.set_ylabel('Centroid Z (m)', color='k')
-        ax1.plot(frames, centroidZ_history[plot_lo:plot_hi], 'k-', linewidth=2, label='centroidZ')
-        ax1.tick_params(axis='y', labelcolor='k')
-
-        ax2 = ax1.twinx()
-        ax2.set_ylabel('Anomaly Score (shifted by win_len-1)', color='gray')
-        ax2.plot(anom_frames, HVRAE_loss_history[anom_lo_clamped:anom_hi_clamped], 'r-', linewidth=1.5, label='HVRAE (aligned)')
-        ax2.plot(anom_frames, HVRAE_SL_loss_history[anom_lo_clamped:anom_hi_clamped], 'b-', linewidth=1.5, label='HVRAE_SL (aligned)')
-        ax2.axhline(y=debug_threshold, color='gray', linestyle='--', alpha=0.5, label=f'threshold={debug_threshold}')
-        ax2.tick_params(axis='y', labelcolor='gray')
-
-        ax1.axvline(x=gt_first, color='green', linestyle='--', linewidth=2, label=f'GT first={gt_first}')
-
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize='small')
-        plt.title(f'GT fall at frame {gt_first}: missed by HVRAE, caught by HVRAE_SL')
-        plt.tight_layout()
-        plt.show()
-
-# ----------------------------------------------------------------------------
-
-# Cell 23
-    # --- Debug: HVRAE false positives not present in HVRAE_SL ---
-    # Re-cluster detections to get actual frame indices per cluster
-    def cluster_detections(detected_falls_idx, cluster_win_len=20):
-        clustered = []
-        i = 0
-        while i < len(detected_falls_idx):
-            j = i
-            while j < len(detected_falls_idx) and detected_falls_idx[j] - detected_falls_idx[i] <= cluster_win_len:
-                j += 1
-            clustered.append(detected_falls_idx[i:j])
-            i = j
-        return clustered
-
-    hvrae_clusters = cluster_detections(hvrae_detected)
-    hvrae_sl_clusters = cluster_detections(hvrae_sl_detected)
-
-    # Get FP cluster indices from find_tpfpfn results
-    # hvrae_fp = cluster indices that are FP
-    hvrae_fp_clusters = [hvrae_clusters[i] for i in hvrae_fp]
-    hvrae_sl_fp_clusters = [hvrae_sl_clusters[i] for i in hvrae_sl_fp]
-
-    # For each HVRAE FP cluster, check if HVRAE_SL has a cluster overlapping the same region
-    # Use the first detection in each cluster as a representative frame
-    def cluster_overlaps(cluster, other_clusters, margin=20):
-        c_min, c_max = min(cluster), max(cluster)
-        for oc in other_clusters:
-            oc_min, oc_max = min(oc), max(oc)
-            if c_min <= oc_max + margin and c_max >= oc_min - margin:
-                return True
-        return False
-
-    hvrae_only_fp = [c for c in hvrae_fp_clusters if not cluster_overlaps(c, hvrae_sl_fp_clusters)]
-
-    print(f"HVRAE FP clusters: {len(hvrae_fp_clusters)}")
-    print(f"HVRAE FP clusters NOT in HVRAE_SL: {len(hvrae_only_fp)}")
-
-    win_len = 10
-    for ci, cluster in enumerate(hvrae_only_fp):
-        rep_frame = cluster[0]  # first detection in cluster
-        print(f"\n--- HVRAE-only FP cluster {ci}, detections at frames {cluster} ---")
-        print(f"  centroidZ at first det: {centroidZ_history[rep_frame]:.3f}")
-
-        # Aligned anomaly prints: for frame i, anomaly = loss_history[i - (win_len-1)]
-        print_lo = max(0, rep_frame - 15 - (win_len - 1))
-        print_hi = min(len(HVRAE_loss_history), rep_frame + 16 - (win_len - 1))
-        print_frame_lo = print_lo + (win_len - 1)
-        print_frame_hi = print_hi + (win_len - 1)
-        frames_range = list(range(print_frame_lo, print_frame_hi))
-        pointer_parts = []
-        for f_idx in frames_range:
-            if f_idx == rep_frame:
-                pointer_parts.append(' ^DET '.center(8))
-            else:
-                pointer_parts.append(' ' * 8)
-        print(f"  HVRAE    anomaly (aligned, frames {print_frame_lo}-{print_frame_hi-1}): {[f'{v:.2f}' for v in HVRAE_loss_history[print_lo:print_hi]]}")
-        print(f"  HVRAE_SL anomaly (aligned, frames {print_frame_lo}-{print_frame_hi-1}): {[f'{v:.2f}' for v in HVRAE_SL_loss_history[print_lo:print_hi]]}")
-        print(f"  frame indices: {frames_range}")
-        print(f"                 {''.join(pointer_parts)}")
-
-        # Plot
-        plot_lo = max(0, rep_frame - 30)
-        plot_hi = min(len(HVRAE_loss_history), rep_frame + 31)
-        frames = np.arange(plot_lo, plot_hi)
-        anom_lo = max(0, plot_lo - (win_len - 1))
-        anom_hi = min(len(HVRAE_loss_history), plot_hi - (win_len - 1))
-        anom_frames = np.arange(anom_lo + (win_len - 1), anom_hi + (win_len - 1))
-
-        fig, ax1 = plt.subplots(figsize=(12, 4))
-        ax1.set_xlabel('Frame')
-        ax1.set_ylabel('Centroid Z (m)', color='k')
-        ax1.plot(frames, centroidZ_history[plot_lo:plot_hi], 'k-', linewidth=2, label='centroidZ')
-        ax1.tick_params(axis='y', labelcolor='k')
-
-        ax2 = ax1.twinx()
-        ax2.set_ylabel('Anomaly Score (aligned)', color='gray')
-        ax2.plot(anom_frames, HVRAE_loss_history[anom_lo:anom_hi], 'r-', linewidth=1.5, label='HVRAE (aligned)')
-        ax2.plot(anom_frames, HVRAE_SL_loss_history[anom_lo:anom_hi], 'b-', linewidth=1.5, label='HVRAE_SL (aligned)')
-        ax2.axhline(y=debug_threshold, color='gray', linestyle='--', alpha=0.5, label=f'threshold={debug_threshold}')
-        ax2.tick_params(axis='y', labelcolor='gray')
-
-        # Mark first detection in the cluster
-        ax1.axvline(x=cluster[0], color='red', linestyle='--', linewidth=2, label=f'first det={cluster[0]}')
-
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize='small')
-        plt.title(f'HVRAE-only FP cluster {ci} (first det at frame {rep_frame})')
-        plt.tight_layout()
-        plt.show()
-
-# ----------------------------------------------------------------------------
-
-# Cell 24
-    # --- Debug: HVRAE_SL false positives not present in HVRAE ---
-    hvrae_sl_only_fp = [c for c in hvrae_sl_fp_clusters if not cluster_overlaps(c, hvrae_fp_clusters)]
-
-    print(f"HVRAE_SL FP clusters: {len(hvrae_sl_fp_clusters)}")
-    print(f"HVRAE_SL FP clusters NOT in HVRAE: {len(hvrae_sl_only_fp)}")
-
-    win_len = 10
-    for ci, cluster in enumerate(hvrae_sl_only_fp):
-        rep_frame = cluster[0]
-        print(f"\n--- HVRAE_SL-only FP cluster {ci}, detections at frames {cluster} ---")
-        print(f"  centroidZ at first det: {centroidZ_history[rep_frame]:.3f}")
-
-        # Plot
-        plot_lo = max(0, rep_frame - 30)
-        plot_hi = min(len(HVRAE_loss_history), rep_frame + 31)
-        frames = np.arange(plot_lo, plot_hi)
-        anom_lo = max(0, plot_lo - (win_len - 1))
-        anom_hi = min(len(HVRAE_loss_history), plot_hi - (win_len - 1))
-        anom_frames = np.arange(anom_lo + (win_len - 1), anom_hi + (win_len - 1))
-
-        fig, ax1 = plt.subplots(figsize=(12, 4))
-        ax1.set_xlabel('Frame')
-        ax1.set_ylabel('Centroid Z (m)', color='k')
-        ax1.plot(frames, centroidZ_history[plot_lo:plot_hi], 'k-', linewidth=2, label='centroidZ')
-        ax1.tick_params(axis='y', labelcolor='k')
-
-        ax2 = ax1.twinx()
-        ax2.set_ylabel('Anomaly Score (aligned)', color='gray')
-        ax2.plot(anom_frames, HVRAE_loss_history[anom_lo:anom_hi], 'r-', linewidth=1.5, label='HVRAE (aligned)')
-        ax2.plot(anom_frames, HVRAE_SL_loss_history[anom_lo:anom_hi], 'b-', linewidth=1.5, label='HVRAE_SL (aligned)')
-        ax2.axhline(y=debug_threshold, color='gray', linestyle='--', alpha=0.5, label=f'threshold={debug_threshold}')
-        ax2.tick_params(axis='y', labelcolor='gray')
-
-        # Mark first detection in the cluster
-        ax1.axvline(x=cluster[0], color='blue', linestyle='--', linewidth=2, label=f'first det={cluster[0]}')
-
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper left', fontsize='small')
-        plt.title(f'HVRAE_SL-only FP cluster {ci} (first det at frame {rep_frame})')
-        plt.tight_layout()
-        plt.show()
+# --- Debug: HVRAE_SL false positives not present in HVRAE ---
+hvrae_sl_only_fp = [c for c in hvrae_sl_fp_clusters if not cluster_overlaps(c, hvrae_fp_clusters)]
+
+print(f"HVRAE_SL FP clusters: {len(hvrae_sl_fp_clusters)}")
+print(f"HVRAE_SL FP clusters NOT in HVRAE: {len(hvrae_sl_only_fp)}")
+
+win_len = 10
+for ci, cluster in enumerate(hvrae_sl_only_fp):
+    rep_frame = cluster[0]
+    print(f"\n--- HVRAE_SL-only FP cluster {ci}, detections at frames {cluster} ---")
+    print(f"  centroidZ at first det: {centroidZ_history[rep_frame]:.3f}")
+
+    # Plot
+    plot_fall_window(
+        gt_frame=rep_frame,
+        centroidZ_history=centroidZ_history,
+        loss_histories={
+            "HVRAE (aligned)": (HVRAE_loss_history, "r"),
+            "HVRAE_SL (aligned)": (HVRAE_SL_loss_history, "b"),
+        },
+        gt_label="first det",
+        threshold_line=debug_threshold,
+        title=f"HVRAE_SL-only FP cluster {ci} (first det at frame {rep_frame})",
+    )
