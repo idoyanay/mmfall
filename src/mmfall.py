@@ -1,4 +1,9 @@
 # Cell 1
+print("hello world")
+
+# ----------------------------------------------------------------------------
+
+# Cell 2
 from google.colab import drive
 drive.mount('/content/drive')
 
@@ -12,7 +17,7 @@ os.environ["TF_USE_LEGACY_KERAS"] = "1"
 
 # ----------------------------------------------------------------------------
 
-# Cell 2
+# Cell 3
 # Author: Feng Jin. Contact info: fengjin@email.arizona.edu
 import argparse, os
 import matplotlib.pyplot as plt
@@ -59,6 +64,7 @@ class data_preproc:
         centroidX_his = []
         centroidY_his = []
         centroidZ_his = []
+        centroidVz_his = []
 
         # Load the recorded bin file
         raw_pointcloud = np.load(binfile_path, allow_pickle=True)
@@ -84,10 +90,15 @@ class data_preproc:
             centroidY    = results[1]
             centroidZ    = results[2] + self.height
 
+            # Rotate velocity vector to ground coordinates (no height offset for velocity)
+            vel_results      = np.matmul(self.rotation_matrix, np.array([centroidVx, centroidVy, centroidVz]))
+            centroidVz_ground = vel_results[2]
+
             # Record the centroid history over time
             centroidX_his.append(centroidX)
             centroidY_his.append(centroidY)
             centroidZ_his.append(centroidZ)
+            centroidVz_his.append(centroidVz_ground)
 
             processed_pattern  = []
             for frame in pattern:
@@ -134,7 +145,7 @@ class data_preproc:
             return traindata, testdata
         else: # For inference on anomaly dataset
             print("INFO: Total inference motion pattern data shape: " + str(total_processed_pattern_np.shape))
-            return total_processed_pattern, centroidZ_his
+            return total_processed_pattern, centroidZ_his, centroidVz_his
 
     def proposed_oversampling(self, processed_pointcloud):
         # # Check the input
@@ -694,9 +705,16 @@ class autoencoder_mdl:
 
 
 
+def numerical_velocity(centroidZ_history, frame_duration=0.1):
+    """Compute centroidZ velocity via finite differences."""
+    vz = [0.0]
+    for i in range(1, len(centroidZ_history)):
+        vz.append((centroidZ_history[i] - centroidZ_history[i - 1]) / frame_duration)
+    return vz
+
 # ----------------------------------------------------------------------------
 
-# Cell 3
+# Cell 4
 class compute_metric:
     def __init__(self):
         pass
@@ -796,7 +814,7 @@ class compute_metric_early_predict:
         self.prediction_gap = prediction_gap
         self.lower_bound = lower_bound
 
-    def detect_falls(self, loss_history, centroidZ_history, threshold, centroidZ_thr=0.6):
+    def detect_falls(self, loss_history, centroidZ_history, threshold, centroidZ_thr=0.6, method='drop', centroidVz_history=None, frame_duration=0.1):
         assert len(loss_history) == len(centroidZ_history), "ERROR: The length of loss history is different than the length of centroidZ history!"
         seq_len                 = len(loss_history)
         win_len                 = 10
@@ -806,8 +824,14 @@ class compute_metric_early_predict:
         while i < seq_len:
             start_win = i - (win_len - 1)
             end_win = i
-            if centroidZ_history[start_win] - centroidZ_history[end_win] >= centroidZ_dropthres:
-                detected_falls_idx.append(int(end_win))
+            if method == 'drop':
+                if centroidZ_history[start_win] - centroidZ_history[end_win] >= centroidZ_dropthres:
+                    detected_falls_idx.append(int(end_win))
+            elif method == 'velocity':
+                assert centroidVz_history is not None, "centroidVz_history required for method='velocity'"
+                estimated_Z = centroidZ_history[end_win] + centroidVz_history[end_win] * self.prediction_gap * frame_duration
+                if centroidZ_history[start_win] - estimated_Z >= centroidZ_dropthres:
+                    detected_falls_idx.append(int(end_win))
             i += 1
 
 
@@ -871,29 +895,29 @@ class compute_metric_early_predict:
 
         # Sanity check: every GT fall is either TP or FN
         assert len(falls_tp) + len(falls_fn) == len(gt_start_falls), \
-            f"TP + FN \!= GT falls: {len(falls_tp)} + {len(falls_fn)} \!= {len(gt_start_falls)}"
+            f"TP + FN != GT falls: {len(falls_tp)} + {len(falls_fn)} != {len(gt_start_falls)}"
 
         return falls_tp, falls_fp, falls_fn
 
-    def cal_roc_anomaly(self, loss_history, centroidZ_history, gt_start_falls, gt_predict_frames=None):
+    def cal_roc_anomaly(self, loss_history, centroidZ_history, gt_start_falls, gt_predict_frames=None, method='drop', centroidVz_history=None, frame_duration=0.1):
         n_gt_falls = len(gt_start_falls)
         print("How many falls?", n_gt_falls)
         tpr, fpr = [], []
         centroidZ_thr = 0.6
         for threshold in np.arange(0.0, 10.0, 0.1):
-            detected_falls_idx, _ = self.detect_falls(loss_history, centroidZ_history, threshold, centroidZ_thr)
+            detected_falls_idx, _ = self.detect_falls(loss_history, centroidZ_history, threshold, centroidZ_thr, method=method, centroidVz_history=centroidVz_history, frame_duration=frame_duration)
             falls_tp, falls_fp, falls_fn = self.find_tpfpfn(detected_falls_idx, gt_start_falls, gt_predict_frames)
             tpr.append(len(falls_tp) / n_gt_falls)
             fpr.append(len(falls_fp))
         return tpr, fpr
 
-    def cal_roc_centroid(self, loss_history, centroidZ_history, gt_start_falls, gt_predict_frames=None):
+    def cal_roc_centroid(self, loss_history, centroidZ_history, gt_start_falls, gt_predict_frames=None, method='drop', centroidVz_history=None, frame_duration=0.1):
         n_gt_falls = len(gt_start_falls)
         print("How many falls?", n_gt_falls)
         tpr, fpr = [], []
         anomaly_thr = 5
         for centroid_thr in np.arange(0.0, 0.6, 0.1):
-            detected_falls_idx, _ = self.detect_falls(loss_history, centroidZ_history, anomaly_thr, centroid_thr)
+            detected_falls_idx, _ = self.detect_falls(loss_history, centroidZ_history, anomaly_thr, centroid_thr, method=method, centroidVz_history=centroidVz_history, frame_duration=frame_duration)
 
             falls_tp, falls_fp, falls_fn = self.find_tpfpfn(detected_falls_idx, gt_start_falls, gt_predict_frames)
             tpr.append(len(falls_tp) / n_gt_falls)
@@ -902,7 +926,7 @@ class compute_metric_early_predict:
 
 # ----------------------------------------------------------------------------
 
-# Cell 4
+# Cell 5
 # project_path = '/Users/idoyanay/projects/personal_projects/mmfall/'
 project_path = '/content/drive/MyDrive/mmfall/'
 
@@ -996,17 +1020,18 @@ def local_maxima_top_n(numbers, n=4, window=15):
 
 # ----------------------------------------------------------------------------
 
-# Cell 5
+# Cell 6
 # Load inference dataset and the ground truth timesheet
 inferencedata_file_falls                      = project_path + 'data/DS1/DS1_4falls'
-inferencedata_falls, centroidZ_history_falls        = data_preproc().load_bin(inferencedata_file_falls + '.npy', fortrain=False)
+inferencedata_falls, centroidZ_history_falls, centroidVz_history_falls = data_preproc().load_bin(inferencedata_file_falls + '.npy', fortrain=False)
 
 inferencedata_file_normal                      = project_path + 'data/DS1/DS1_4normal'
-inferencedata_normal, centroidZ_history_normal        = data_preproc().load_bin(inferencedata_file_normal + '.npy', fortrain=False)
+inferencedata_normal, centroidZ_history_normal, centroidVz_history_normal = data_preproc().load_bin(inferencedata_file_normal + '.npy', fortrain=False)
 
 # ---- concatinate the falls and normal data for better initial testing ---- #
 inferencedata_falls_normal = inferencedata_falls + inferencedata_normal
 centroidZ_history_falls_normal = centroidZ_history_falls + centroidZ_history_normal
+centroidVz_history_falls_normal = centroidVz_history_falls + centroidVz_history_normal
 
 # --- calculate the gt_falls_idx (by knowing that there are only 4 falls)
 centroidZ_history_np = np.array(centroidZ_history_falls)
@@ -1044,7 +1069,7 @@ RAE_loss_history_falls_normal = RAE_loss_history_falls + RAE_loss_history_normal
 
 # ----------------------------------------------------------------------------
 
-# Cell 6
+# Cell 7
 # --- Visualize each DS1 fall with centroidZ and anomaly histories ---
 centroidZ_falls_np = np.array(centroidZ_history_falls)
 
@@ -1068,10 +1093,10 @@ for fi, gt_hit in enumerate(gt_falls_idx_sorted):
 
 # ----------------------------------------------------------------------------
 
-# Cell 7
+# Cell 8
 # Load inference dataset and the ground truth timesheet
 inferencedata_file                      = project_path + 'data/DS2/DS2'
-inferencedata, centroidZ_history        = data_preproc().load_bin(inferencedata_file + '.npy', fortrain=False)
+inferencedata, centroidZ_history, centroidVz_history = data_preproc().load_bin(inferencedata_file + '.npy', fortrain=False)
 # Ground truth time index file exists
 if os.path.exists(inferencedata_file + '.csv'):
     gt_falls_idx                        = np.genfromtxt(inferencedata_file + '.csv', delimiter=',').astype(int)
@@ -1089,7 +1114,7 @@ RAE_loss_history                        = model.RAE_predict(inferencedata)
 
 # ----------------------------------------------------------------------------
 
-# Cell 8
+# Cell 9
 # Create DS2_PREDICT: expand each GT fall to all adjacent frames with centroidZ < threshold
 centroid_thr = 0.6
 search_radius = 10
@@ -1151,7 +1176,7 @@ print(f"Saved to {project_path + 'data/DS2/DS2_PREDICT_FIRSTS.csv'}")
 
 # ----------------------------------------------------------------------------
 
-# Cell 9
+# Cell 10
 # --- DS2_START_FALLS: find the actual "body hits ground" frame per GT fall ---
 centroidZ_np = np.array(centroidZ_history)
 drop_window = 5  # frames to look backward/forward
@@ -1196,7 +1221,7 @@ print(f"DS2_START_FALLS: {len(gt_start_falls)} falls, saved to data/DS2/DS2_STAR
 
 # ----------------------------------------------------------------------------
 
-# Cell 10
+# Cell 11
 # For performace evaluation
 calculator                              = compute_metric()
 HVRAE_tpr, HVRAE_fp_total                 = calculator.cal_roc(HVRAE_loss_history, centroidZ_history, gt_falls_idx)
@@ -1229,7 +1254,7 @@ plt.show()
 
 # ----------------------------------------------------------------------------
 
-# Cell 11
+# Cell 12
 # --- Visualize each GT fall (gt_start_falls) with centroidZ and anomaly histories ---
 centroidZ_np = np.array(centroidZ_history)
 
@@ -1252,7 +1277,7 @@ for fi, gt_hit in enumerate(gt_start_falls):
 
 # ----------------------------------------------------------------------------
 
-# Cell 12
+# Cell 13
 # Early prediction evaluation on DS2
 gt_predict_frames = set(np.loadtxt(project_path + 'data/DS2/DS2_PREDICT.csv', dtype=int))
 # gt_start_falls = set(np.loadtxt(project_path + 'data/DS2/DS2_START_FALLS.csv', dtype=int))
@@ -1304,7 +1329,96 @@ for gap in [1, 2, 3]:
 
 # ----------------------------------------------------------------------------
 
-# Cell 13
+# Cell 14
+# --- Velocity-based ROC evaluation on DS2 ---
+centroidVz_numerical = numerical_velocity(centroidZ_history)
+
+colors = {'HVRAE': 'r', 'HVRAE_SL': 'b', 'RAE': 'g'}
+linestyles = {'drop': '-', 'radar': '--', 'numerical': ':'}
+loss_histories = {
+    'HVRAE': HVRAE_loss_history,
+    'HVRAE_SL': HVRAE_SL_loss_history,
+    'RAE': RAE_loss_history,
+}
+
+for gap in [1, 2, 3]:
+    calculator = compute_metric_early_predict(prediction_gap=gap)
+    plt.figure(figsize=(10, 6))
+
+    for model_name, loss_hist in loss_histories.items():
+        for method_name, ls in linestyles.items():
+            if method_name == 'drop':
+                method_arg = 'drop'
+                vz_arg = None
+            elif method_name == 'radar':
+                method_arg = 'velocity'
+                vz_arg = centroidVz_history
+            else:  # numerical
+                method_arg = 'velocity'
+                vz_arg = centroidVz_numerical
+
+            tpr, fpr = calculator.cal_roc_anomaly(
+                loss_hist, centroidZ_history, gt_start_falls, gt_predict_frames,
+                method=method_arg, centroidVz_history=vz_arg,
+            )
+            plt.plot(fpr, tpr, color=colors[model_name], linestyle=ls,
+                     linewidth=2, label=f'{model_name} ({method_name})')
+
+    plt.xlim(-0.1, 31)
+    plt.xticks(np.arange(0, 32, 2))
+    plt.ylim(0.0, 1.1)
+    plt.title(f'DS2 Velocity ROC (anomaly sweep, gap={gap} frames)')
+    plt.xlabel('Number of False Alarms')
+    plt.ylabel('True Fall Detection Rate')
+    plt.legend(loc='lower right', fontsize='small', ncol=2)
+    plt.tight_layout()
+    plt.show()
+
+# ----------------------------------------------------------------------------
+
+# Cell 15
+# --- Estimated vs actual centroidZ around GT falls ---
+centroidVz_numerical = numerical_velocity(centroidZ_history)
+centroidZ_np = np.array(centroidZ_history)
+
+for gap in [1, 2, 3]:
+    for fi, gt_hit in enumerate(gt_start_falls):
+        gt_hit = int(gt_hit)
+        margin = 30
+        plot_lo = max(0, gt_hit - margin)
+        plot_hi = min(len(centroidZ_history), gt_hit + margin + 1)
+        frames = np.arange(plot_lo, plot_hi)
+
+        actual_Z = centroidZ_np[plot_lo:plot_hi]
+
+        # Estimated Z using radar Vz
+        est_radar = np.array([
+            centroidZ_np[f] + centroidVz_history[f] * gap * 0.1
+            for f in range(plot_lo, plot_hi)
+        ])
+
+        # Estimated Z using numerical Vz
+        est_numerical = np.array([
+            centroidZ_np[f] + centroidVz_numerical[f] * gap * 0.1
+            for f in range(plot_lo, plot_hi)
+        ])
+
+        fig, ax = plt.subplots(figsize=(12, 4))
+        ax.plot(frames, actual_Z, 'k-', linewidth=2, label='Actual centroidZ')
+        ax.plot(frames, est_radar, 'r--', linewidth=1.5, label=f'Est. (radar Vz, gap={gap})')
+        ax.plot(frames, est_numerical, 'b:', linewidth=1.5, label=f'Est. (numerical Vz, gap={gap})')
+        ax.axvline(x=gt_hit, color='orange', linestyle='--', linewidth=2, label=f'GT fall={gt_hit}')
+        ax.axhline(y=0.6, color='gray', linestyle='--', alpha=0.5, label='centroidZ thr=0.6')
+        ax.set_xlabel('Frame')
+        ax.set_ylabel('CentroidZ (m)')
+        ax.set_title(f'GT fall {fi+1}/{len(gt_start_falls)}: frame {gt_hit}, gap={gap}')
+        ax.legend(loc='upper right', fontsize='small')
+        plt.tight_layout()
+        plt.show()
+
+# ----------------------------------------------------------------------------
+
+# Cell 16
 plt.figure()
 plt.ylim(0.0, 2.2)
 plt.xlabel("Time in Seconds")
@@ -1359,7 +1473,7 @@ print("------------------")
 
 # ----------------------------------------------------------------------------
 
-# Cell 14
+# Cell 17
 # --- Debug: GT falls missed by HVRAE but caught by HVRAE_SL ---
 # Run detection at fixed thresholds for both models, compute TP/FP/FN,
 # then find GT falls that HVRAE misses (FN) but HVRAE_SL catches (TP).
@@ -1433,7 +1547,7 @@ for gt_first in missed_by_hvrae_caught_by_sl:
 
 # ----------------------------------------------------------------------------
 
-# Cell 15
+# Cell 18
 # --- Debug: HVRAE false positives not present in HVRAE_SL ---
 # Re-cluster detections to get actual frame indices per cluster
 hvrae_clusters = cluster_detections(hvrae_detected)
@@ -1489,7 +1603,7 @@ for ci, cluster in enumerate(hvrae_only_fp):
 
 # ----------------------------------------------------------------------------
 
-# Cell 16
+# Cell 19
 # --- Debug: HVRAE_SL false positives not present in HVRAE ---
 hvrae_sl_only_fp = [c for c in hvrae_sl_fp_clusters if not cluster_overlaps(c, hvrae_fp_clusters)]
 

@@ -19,3 +19,10 @@ Elderly fall prevention and detection becomes extremely crucial with the fast ag
 
 ## Source Codes:
 See ~/src/mmfall.ipynb to reproduce the results in the paper.
+
+## Velocity-Based Early Fall Detection
+In addition to the original height-drop detection, the notebook includes a velocity-based method that uses centroidZ velocity to **predict** where the person will be several frames in the future. This enables earlier fall detection by extrapolating the current downward motion. Two velocity sources are compared:
+- **Radar Vz**: the hardware-reported centroid vertical velocity (rotation-corrected to ground coordinates)
+- **Numerical Vz**: finite-difference derivative of the centroidZ history
+
+ROC curves and estimated-vs-actual centroidZ visualizations are provided for prediction gaps of 1, 2, and 3 frames.

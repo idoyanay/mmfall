@@ -50,8 +50,11 @@ Raw `.npy` files contain per-frame radar point arrays with 15 fields each:
 `data_preproc.load_bin()` processes raw data into motion patterns of shape `(N, 10, 64, 4)`:
 - Groups consecutive frames into overlapping 10-frame windows (1 second at 10 fps)
 - Applies a rotation matrix (10° tilt correction) + height offset (1.8 m) to transform radar coords to ground coords
+- Also rotates the centroid velocity vector to ground coordinates (no height offset) and records `centroidVz_history`
 - Extracts feature vector `(delta_x, delta_y, z, Doppler)` per point — x/y are centroid-relative, z is absolute
 - Runs `proposed_oversampling()` to normalize each frame to exactly 64 points: rescales existing points to preserve mean/variance, then pads to 64 with the mean vector
+
+When `fortrain=False`, returns `(total_processed_pattern, centroidZ_his, centroidVz_his)`.
 
 Pre-processed training data is cached as `data/normal_train_data.npy` and `data/normal_test_data.npy` (from DS0, 80/20 split).
 
@@ -73,7 +76,11 @@ Inference produces a per-frame `loss_history` (anomaly score) alongside a `centr
 
 **`compute_metric`** (symmetric, post-hoc): A fall is detected when a centroid height drop ≥ 0.6 m occurs within a 20-frame (2 sec) centered window AND an anomaly spike exceeds the threshold within the same window. TP matching uses a ±10-frame symmetric window around ground truth.
 
-**`compute_metric_predict`** (causal, predictive): Uses a 10-frame backward-looking window. Reports the first frame index of each detected fall cluster (earliest prediction). TP matching is one-sided: a detection counts as TP if it occurs at or before `GT + 5 frames`, rewarding early detection. Provides two ROC sweep methods: `cal_roc_anomaly` (sweeps anomaly threshold, fixed centroid threshold=0.6) and `cal_roc_centroid` (sweeps centroid threshold, fixed anomaly=5).
+**`compute_metric_early_predict`** (causal, predictive): Uses a 10-frame backward-looking window. Reports the first frame index of each detected fall cluster (earliest prediction). TP matching is one-sided: a detection counts as TP if it occurs at or before `GT + 5 frames`, rewarding early detection. Provides two ROC sweep methods: `cal_roc_anomaly` (sweeps anomaly threshold, fixed centroid threshold=0.6) and `cal_roc_centroid` (sweeps centroid threshold, fixed anomaly=5).
+
+`detect_falls` supports two detection methods via `method=` parameter:
+- `method='drop'` (default): Original behavior — checks if centroidZ dropped by threshold within the backward window.
+- `method='velocity'`: Uses centroidZ velocity to estimate where the person will be `prediction_gap` frames in the future: `estimated_Z = centroidZ[end_win] + centroidVz[end_win] * prediction_gap * frame_duration`. Two velocity sources are compared: radar hardware-reported centroidVz (rotation-corrected) and a numerical derivative of centroidZ_history via `numerical_velocity()`.
 
 ### Datasets
 
