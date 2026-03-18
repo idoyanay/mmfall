@@ -1,28 +1,115 @@
-## Project Title:
-mmFall: Fall Detection using 4D MmWave Radar and a Hybrid Variational RNN AutoEncoder
+# mmFall: Fall Detection using 4D MmWave Radar and a Hybrid Variational RNN AutoEncoder
 
-## Preprint Paper
-https://arxiv.org/abs/2003.02386
+Based on the paper: https://arxiv.org/abs/2003.02386
 
-## Project Description:
-Elderly fall prevention and detection becomes extremely crucial with the fast aging population globally. In this paper, we propose mmFall - a novel fall detection system, which comprises of (i) the emerging millimeter-wave (mmWave) radar sensor to collect the human body’s point cloud along with the body centroid, and (ii) a Hybrid Variational RNN AutoEncoder (HVRAE) to compute the anomaly level of the body motion based on the acquired point cloud. A fall is detected when the spike in anomaly level and the drop in centroid height occur simultaneously. The mmWave radar sensor offers privacycompliance and high sensitivity to motion, over the traditional sensing modalities. However, (i) randomness in radar point cloud and (ii) difficulties in fall collection/labeling in the traditional supervised fall detection approaches are the two major challenges. To overcome the randomness in radar data, the proposed HVRAE uses variational inference, a generative approach rather than a discriminative approach, to infer the posterior probability of the body’s latent motion state every frame, followed by a recurrent neural network (RNN) to summarize the temporal features over multiple frames. Moreover, to circumvent the difficulties in fall data collection/labeling, the HVRAE is built upon an autoencoder architecture in a semi-supervised approach, which is only trained on the normal activities of daily living (ADL). In the inference stage, the HVRAE will generate a spike in the anomaly level once an abnormal motion, such as fall, occurs. During the experiment1, we implemented the HVRAE along with two other baselines, and tested on the dataset collected in an apartment. The receiver operating characteristic (ROC) curve indicates that our proposed model outperforms baselines and achieves 98% detection out of 50 falls at the expense of just 2 false alarms.
+## Project Description
 
-## Proposed mmFall System:
+Elderly fall prevention and detection becomes extremely crucial with the fast aging population globally. mmFall is a fall detection system that uses (i) a millimeter-wave (mmWave) radar sensor (TI AWR1843BOOST) to collect the human body's point cloud along with the body centroid, and (ii) a Hybrid Variational RNN AutoEncoder (HVRAE) to compute the anomaly level of the body motion. A fall is detected when a spike in anomaly level and a drop in centroid height occur simultaneously.
+
+The system is trained exclusively on normal Activities of Daily Living (ADL) in a semi-supervised approach -- no fall data is needed for training. At inference, the HVRAE generates a spike in anomaly level when an abnormal motion (such as a fall) occurs.
+
+## Proposed mmFall System
+
 ![mmfall](https://github.com/radar-lab/mmfall/blob/master/misc/mmfall.png)
 
+## Experiment Setup
+
+![Hardware Setup](https://github.com/radar-lab/mmfall/blob/master/misc/hardware_setup.png)
+
 ## Video Presentation
+
 [![videopresentation](https://github.com/radar-lab/mmfall/blob/master/misc/0.jpg)](https://drive.google.com/file/d/1aClSbmZ-mjsR8Ap6FQAud667QbaYWerg/view?usp=sharing)
 
+## Setup
 
-## Experiment Setup:
-![Hardwre Setup](https://github.com/radar-lab/mmfall/blob/master/misc/hardware_setup.png)
+```bash
+python -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+pip install tensorflow keras
+```
 
-## Source Codes:
-See ~/src/mmfall.ipynb to reproduce the results in the paper.
+`requirements.txt` pins data/plotting dependencies (numpy, matplotlib, h5py, etc.). TensorFlow/Keras must be installed separately.
 
-## Velocity-Based Early Fall Detection
-In addition to the original height-drop detection, the notebook includes a velocity-based method that uses centroidZ velocity to **predict** where the person will be several frames in the future. This enables earlier fall detection by extrapolating the current downward motion. Two velocity sources are compared:
-- **Radar Vz**: the hardware-reported centroid vertical velocity (rotation-corrected to ground coordinates)
-- **Numerical Vz**: finite-difference derivative of the centroidZ history
+## Running
 
-ROC curves and estimated-vs-actual centroidZ visualizations are provided for prediction gaps of 1, 2, and 3 frames.
+The main entry point is the Jupyter notebook:
+```bash
+jupyter notebook src/mmfall.ipynb
+```
+
+`src/mmfall.py` is an auto-generated script version of the same notebook code.
+
+Utility scripts:
+```bash
+python combine.py --filedir data/DS2/         # merge multiple .npy recordings + .csv ground truth
+python data_visualizer.py --gtfile <raw.npy> --binfile <processed.npy>  # 3D animated point cloud
+python data_analyzer.py --test <test.npy> --prediction <pred.npy> --raw <raw.npy>  # point-by-point inspection
+```
+
+## Models
+
+All three models share input shape `(10, 64, 4)` -- 10 frames, 64 points, 4 features (`delta_x, delta_y, z, Doppler`).
+
+| Model | Architecture | Loss | Output |
+|---|---|---|---|
+| **HVRAE** (proposed) | VAE + SimpleRNN encoder-decoder, decoder outputs (mean, log_var) | Gaussian reconstruction log-likelihood + KL divergence | (10, 64, 8) |
+| **HVRAE_SL** (baseline) | Same as HVRAE, decoder outputs mean only | MSE + KL divergence | (10, 64, 4) |
+| **RAE** (baseline) | Standard recurrent autoencoder, no variational components | MSE | (10, 64, 4) |
+
+Trained with Adam (lr=0.001), 5 epochs, batch size 8. Saved weights in `saved_model/`.
+
+## Datasets
+
+| Dataset | Contents | Use |
+|---|---|---|
+| DS0 | ~2h normal ADL, no falls | Training/testing (80/20 split) |
+| DS1 | 4 falls + other motions | Illustration |
+| DS2 | 50 falls + 200 normal motions, labeled | ROC evaluation |
+
+## Fall Detection Methods
+
+### Base: `compute_metric` (post-hoc)
+
+The original algorithm from the base project. Uses a 20-frame centered (symmetric) window for both centroidZ drop detection and anomaly matching. A fall is detected when a height drop >= 0.6 m and an anomaly spike above threshold co-occur in the same window. TP matching uses a symmetric +-10-frame window around ground truth.
+
+See the [base project](https://github.com/radar-lab/mmfall) for full details.
+
+### Early prediction: `compute_metric_early_predict` (causal)
+
+Adapts the base algorithm into a causal, predictive detector:
+
+- **Backward-looking 10-frame window** instead of centered 20-frame window
+- Anomaly spike must occur **before** the centroidZ drop, offset by a configurable `prediction_gap`
+- TP matching is one-sided: detection must occur at or before the fall to count as TP
+
+Two detection methods via `method=` parameter:
+- `method='drop'`: checks if centroidZ dropped by threshold within the backward window (same logic as base, but causal)
+- `method='velocity'`: uses centroidZ velocity to **predict** where the person will be `prediction_gap` frames in the future, enabling earlier detection by extrapolating current downward motion
+
+### Weighted anomaly detection (`method='velocity'` only)
+
+When `weighted=True`, the effective anomaly threshold is lowered proportionally to the severity of the predicted fall:
+
+```
+Z_ref = centroidZ_history[start_win]       # standing height before the fall
+estimated_Z = centroidZ[j] + centroidVz[j] * prediction_gap * frame_duration
+
+ratio = max(0, (Z_ref - estimated_Z) / Z_ref)
+weight = 1 + scale * ratio^power
+effective_threshold = threshold / weight
+```
+
+A larger predicted drop from the person's own starting height produces a higher weight, lowering the anomaly threshold needed to confirm the fall. Parameters `scale` and `power` control the strength and shape of this relationship.
+
+See [src/compute_metric_early_predict.md](src/compute_metric_early_predict.md) for the full algorithm description.
+
+## Results
+
+The base project achieves 98% detection out of 50 falls with just 2 false alarms using the post-hoc `compute_metric` evaluator.
+
+The notebook includes ROC curves comparing all three models across:
+- Anomaly threshold sweeps (fixed centroidZ threshold)
+- CentroidZ threshold sweeps (fixed anomaly threshold)
+- Drop vs velocity-based detection at various prediction gaps
+- Weighted vs unweighted anomaly detection with various (power, scale) configurations
